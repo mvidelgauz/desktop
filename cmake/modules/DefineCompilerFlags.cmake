@@ -15,9 +15,7 @@ if (${CMAKE_C_COMPILER_ID} MATCHES "(GNU|Clang)")
     # add -Wconversion ?
     # cannot be pedantic with sqlite3 directly linked
     # FIXME Can we somehow not use those flags for sqlite3.* but use them for the rest of csync?
-    if (NOT USE_OUR_OWN_SQLITE3)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -pedantic -pedantic-errors")
-    endif()
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -pedantic -pedantic-errors")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wshadow -Wmissing-prototypes")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wunused -Wfloat-equal -Wpointer-arith -Wwrite-strings -Wformat-security")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wmissing-format-attribute")
@@ -47,7 +45,7 @@ if (${CMAKE_C_COMPILER_ID} MATCHES "(GNU|Clang)")
 
     if (CMAKE_BUILD_TYPE)
         string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
-        if (CMAKE_BUILD_TYPE_LOWER MATCHES "(release|relwithdebinfo|minsizerel)")
+        if (CMAKE_BUILD_TYPE_LOWER MATCHES "(release|relwithdebinfo|minsizerel)" AND (NOT ${CMAKE_C_FLAGS} MATCHES "FORTIFY_SOURCE=[3-9]"))
             check_c_compiler_flag("-Wp,-D_FORTIFY_SOURCE=2" WITH_FORTIFY_SOURCE)
             if (WITH_FORTIFY_SOURCE)
                 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wp,-D_FORTIFY_SOURCE=2")

@@ -45,7 +45,7 @@ FolderCreationDialog::FolderCreationDialog(const QString &destination, QWidget *
         ui->newFolderNameEdit->setText(suggestedFolderNamePrefix);
     } else {
         for (unsigned int i = 2; i < std::numeric_limits<unsigned int>::max(); ++i) {
-            const QString suggestedPostfix = QString(" (%1)").arg(i);
+            const QString suggestedPostfix = QStringLiteral(" (%1)").arg(i);
 
             if (!QDir(newFolderFullPath + suggestedPostfix).exists()) {
                 ui->newFolderNameEdit->setText(suggestedFolderNamePrefix + suggestedPostfix);
@@ -67,13 +67,17 @@ void FolderCreationDialog::accept()
 {
     Q_ASSERT(!_destination.endsWith('/'));
 
-    if (QDir(_destination + "/" + ui->newFolderNameEdit->text()).exists()) {
+    const auto fullPath = QString(_destination + "/" + ui->newFolderNameEdit->text());
+
+    if (QDir(fullPath).exists()) {
         ui->labelErrorMessage->setVisible(true);
         return;
     }
 
-    if (!QDir(_destination).mkdir(ui->newFolderNameEdit->text())) {
-        QMessageBox::critical(this, tr("Error"), tr("Could not create a folder! Check your write permissions."));
+    if (QDir(_destination).mkdir(ui->newFolderNameEdit->text())) {
+        Q_EMIT folderCreated(fullPath);
+    } else {
+        QMessageBox::critical(this, tr("Error"), tr("Could not create a folder! Check your write permissions."), QMessageBox::Ok);
     }
 
     QDialog::accept();

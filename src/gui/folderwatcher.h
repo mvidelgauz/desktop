@@ -27,8 +27,7 @@
 #include <QScopedPointer>
 #include <QSet>
 #include <QDir>
-
-class QTimer;
+#include <QTimer>
 
 namespace OCC {
 
@@ -50,6 +49,7 @@ class Folder;
 class FolderWatcher : public QObject
 {
     Q_OBJECT
+
 public:
     // Construct, connect signals, call init()
     explicit FolderWatcher(Folder *folder = nullptr);
@@ -60,9 +60,6 @@ public:
      */
     void init(const QString &root);
 
-    /* Check if the path is ignored. */
-    bool pathIsIgnored(const QString &path);
-
     /**
      * Returns false if the folder watcher can't be trusted to capture all
      * notifications.
@@ -70,7 +67,7 @@ public:
      * For example, this can happen on linux if the inotify user limit from
      * /proc/sys/fs/inotify/max_user_watches is exceeded.
      */
-    bool isReliable() const;
+    [[nodiscard]] bool isReliable() const;
 
     /**
      * Triggers a change in the path and verifies a notification arrives.
@@ -81,12 +78,29 @@ public:
     void startNotificatonTest(const QString &path);
 
     /// For testing linux behavior only
-    int testLinuxWatchCount() const;
+    [[nodiscard]] int testLinuxWatchCount() const;
+
+    void slotLockFileDetectedExternally(const QString &lockFile);
+
+    void setShouldWatchForFileUnlocking(bool shouldWatchForFileUnlocking);
+    [[nodiscard]] int lockChangeDebouncingTimout() const;
 
 signals:
     /** Emitted when one of the watched directories or one
      *  of the contained files is changed. */
     void pathChanged(const QString &path);
+
+    /*
+    * Emitted when lock files were removed
+    */
+    void filesLockReleased(const QSet<QString> &files);
+
+    /*
+     * Emitted when lock files were added
+     */
+    void filesLockImposed(const QSet<QString> &files);
+
+    void lockedFilesFound(const QSet<QString> &files);
 
     /**
      * Emitted if some notifications were lost.
@@ -108,9 +122,11 @@ protected slots:
     // called from the implementations to indicate a change in path
     void changeDetected(const QString &path);
     void changeDetected(const QStringList &paths);
+    void folderAccountCapabilitiesChanged();
 
 private slots:
     void startNotificationTestWhenReady();
+    void lockChangeDebouncingTimerTimedOut();
 
 protected:
     QHash<QString, int> _pendingPathes;
@@ -122,10 +138,20 @@ private:
     Folder *_folder;
     bool _isReliable = true;
 
+    bool _shouldWatchForFileUnlocking = false;
+
     void appendSubPaths(QDir dir, QStringList& subPaths);
+
+    /* Check if the path should be ignored by the FolderWatcher. */
+    [[nodiscard]] bool pathIsIgnored(const QString &path) const;
 
     /** Path of the expected test notification */
     QString _testNotificationPath;
+
+    QSet<QString> _unlockedFiles;
+    QSet<QString> _lockedFiles;
+
+    QTimer _lockChangeDebouncingTimer;
 
     friend class FolderWatcherPrivate;
 };

@@ -15,6 +15,7 @@
 #include "accountstate.h"
 #include "configfile.h"
 #include "testhelper.h"
+#include "logger.h"
 
 using namespace OCC;
 
@@ -23,10 +24,18 @@ class TestAccount: public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void testAccountDavPath_unitialized_noCrash()
     {
         AccountPtr account = Account::create();
-        account->davPath();
+        [[maybe_unused]] const auto davPath = account->davPath();
     }
 };
 

@@ -8,7 +8,9 @@ There are clients for Linux, macOs, and Microsoft Windows.
 
 The currently supported server releases are the latest three stable versions
 at time of publication. It means that the |version| release series is supporting
-server major version 20, 21 and 22.
+stable server major versions.
+See https://github.com/nextcloud/server/wiki/Maintenance-and-Release-Schedule for
+supported major versions.
 
 Installation on Mac OS X and Windows is the same as for any software
 application: download the program and then double-click it to launch the
@@ -31,13 +33,13 @@ download page.
 System Requirements
 ----------------------------------
 
-- Windows 10+
-- macOS 10.12+ (64-bit only)
-- Linux
-- FreeBSD
+- Windows 10+ (64-bits only)
+- macOS 11.4+ (64-bits only)
+- Linux (ubuntu 22.04 or openSUSE 15.5 or ...) (64-bits only)
 
 .. note::
-   For Linux distributions, we support, if technically feasible, the latest 2 versions per platform and the previous LTS.
+   For Linux distributions, we support, if technically feasible, the current LTS releases.
+   For BSD, we support them if technically feasible but we do not test
 
 Customizing the Windows Installation
 ------------------------------------

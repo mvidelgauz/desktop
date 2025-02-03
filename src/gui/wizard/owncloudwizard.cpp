@@ -19,11 +19,14 @@
 #include "theme.h"
 #include "owncloudgui.h"
 
+#ifdef Q_OS_MAC
+#include "foregroundbackground_interface.h"
+#endif
+
 #include "wizard/owncloudwizard.h"
 #include "wizard/welcomepage.h"
 #include "wizard/owncloudsetuppage.h"
 #include "wizard/owncloudhttpcredspage.h"
-#include "wizard/owncloudoauthcredspage.h"
 #include "wizard/owncloudadvancedsetuppage.h"
 #include "wizard/webviewpage.h"
 #include "wizard/flow2authcredspage.h"
@@ -49,7 +52,6 @@ OwncloudWizard::OwncloudWizard(QWidget *parent)
     , _welcomePage(new WelcomePage(this))
     , _setupPage(new OwncloudSetupPage(this))
     , _httpCredsPage(new OwncloudHttpCredsPage(this))
-    , _browserCredsPage(new OwncloudOAuthCredsPage)
     , _flow2CredsPage(new Flow2AuthCredsPage)
     , _advancedSetupPage(new OwncloudAdvancedSetupPage(this))
 #ifdef WITH_WEBENGINE
@@ -58,17 +60,22 @@ OwncloudWizard::OwncloudWizard(QWidget *parent)
     , _webViewPage(nullptr)
 #endif // WITH_WEBENGINE
 {
+#ifdef Q_OS_MAC
+    auto *fgbg = new ForegroundBackground();
+    this->installEventFilter(fgbg);
+#endif
     setObjectName("owncloudWizard");
 
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setPage(WizardCommon::Page_Welcome, _welcomePage);
     setPage(WizardCommon::Page_ServerSetup, _setupPage);
     setPage(WizardCommon::Page_HttpCreds, _httpCredsPage);
-    setPage(WizardCommon::Page_OAuthCreds, _browserCredsPage);
     setPage(WizardCommon::Page_Flow2AuthCreds, _flow2CredsPage);
     setPage(WizardCommon::Page_AdvancedSetup, _advancedSetupPage);
 #ifdef WITH_WEBENGINE
-    setPage(WizardCommon::Page_WebView, _webViewPage);
+    if (!useFlow2()) {
+        setPage(WizardCommon::Page_WebView, _webViewPage);
+    }
 #endif // WITH_WEBENGINE
 
     connect(this, &QDialog::finished, this, &OwncloudWizard::basicSetupFinished);
@@ -79,23 +86,24 @@ OwncloudWizard::OwncloudWizard(QWidget *parent)
     connect(this, &QWizard::currentIdChanged, this, &OwncloudWizard::slotCurrentPageChanged);
     connect(_setupPage, &OwncloudSetupPage::determineAuthType, this, &OwncloudWizard::determineAuthType);
     connect(_httpCredsPage, &OwncloudHttpCredsPage::connectToOCUrl, this, &OwncloudWizard::connectToOCUrl);
-    connect(_browserCredsPage, &OwncloudOAuthCredsPage::connectToOCUrl, this, &OwncloudWizard::connectToOCUrl);
     connect(_flow2CredsPage, &Flow2AuthCredsPage::connectToOCUrl, this, &OwncloudWizard::connectToOCUrl);
 #ifdef WITH_WEBENGINE
-    connect(_webViewPage, &WebViewPage::connectToOCUrl, this, &OwncloudWizard::connectToOCUrl);
+    if (!useFlow2()) {
+        connect(_webViewPage, &WebViewPage::connectToOCUrl, this, &OwncloudWizard::connectToOCUrl);
+    }
 #endif // WITH_WEBENGINE
     connect(_advancedSetupPage, &OwncloudAdvancedSetupPage::createLocalAndRemoteFolders,
         this, &OwncloudWizard::createLocalAndRemoteFolders);
-    connect(this, &QWizard::customButtonClicked, this, &OwncloudWizard::skipFolderConfiguration);
+    connect(this, &QWizard::customButtonClicked, this, &OwncloudWizard::slotCustomButtonClicked);
 
 
     Theme *theme = Theme::instance();
     setWindowTitle(tr("Add %1 account").arg(theme->appNameGUI()));
     setWizardStyle(QWizard::ModernStyle);
     setOption(QWizard::NoBackButtonOnStartPage);
-    setOption(QWizard::NoBackButtonOnLastPage);
     setOption(QWizard::NoCancelButton);
     setButtonText(QWizard::CustomButton1, tr("Skip folders configuration"));
+    setButtonText(QWizard::CustomButton2, tr("Cancel"));
 
     // Change the next buttons size policy since we hide it on the
     // welcome page but want it to fill it's space that we don't get
@@ -134,9 +142,16 @@ void OwncloudWizard::centerWindow()
 void OwncloudWizard::adjustWizardSize()
 {
     const auto pageSizes = calculateWizardPageSizes();
-    const auto longestSide = calculateLongestSideOfWizardPages(pageSizes);
+    const auto currentPageIndex = currentId();
 
-    resize(QSize(longestSide, longestSide));
+    // If we can, just use the size of the current page
+    if(currentPageIndex > -1 && currentPageIndex < pageSizes.count()) {
+        resize(pageSizes.at(currentPageIndex));
+        return;
+    }
+
+    // As a backup, resize to largest page
+    resize(calculateLargestSizeOfWizardPages(pageSizes));
 }
 
 QList<QSize> OwncloudWizard::calculateWizardPageSizes() const
@@ -153,11 +168,17 @@ QList<QSize> OwncloudWizard::calculateWizardPageSizes() const
     return pageSizes;
 }
 
-int OwncloudWizard::calculateLongestSideOfWizardPages(const QList<QSize> &pageSizes) const
+QSize OwncloudWizard::calculateLargestSizeOfWizardPages(const QList<QSize> &pageSizes) const
 {
-    return std::accumulate(std::cbegin(pageSizes), std::cend(pageSizes), 0, [](int current, const QSize &size) {
-        return std::max({ current, size.width(), size.height() });
-    });
+    QSize largestSize;
+    for(const auto size : pageSizes) {
+        const auto largerWidth = qMax(largestSize.width(), size.width());
+        const auto largerHeight = qMax(largestSize.height(), size.height());
+
+        largestSize = QSize(largerWidth, largerHeight);
+    }
+
+    return largestSize;
 }
 
 void OwncloudWizard::setAccount(AccountPtr account)
@@ -178,6 +199,11 @@ QString OwncloudWizard::localFolder() const
 QStringList OwncloudWizard::selectiveSyncBlacklist() const
 {
     return _advancedSetupPage->selectiveSyncBlacklist();
+}
+
+bool OwncloudWizard::useFlow2() const
+{
+    return _useFlow2;
 }
 
 bool OwncloudWizard::useVirtualFileSync() const
@@ -220,17 +246,15 @@ void OwncloudWizard::successfulStep()
         _httpCredsPage->setConnected();
         break;
 
-    case WizardCommon::Page_OAuthCreds:
-        _browserCredsPage->setConnected();
-        break;
-
     case WizardCommon::Page_Flow2AuthCreds:
         _flow2CredsPage->setConnected();
         break;
 
 #ifdef WITH_WEBENGINE
     case WizardCommon::Page_WebView:
-        _webViewPage->setConnected();
+        if (!this->useFlow2()) {
+            _webViewPage->setConnected();
+        }
         break;
 #endif // WITH_WEBENGINE
 
@@ -252,17 +276,30 @@ void OwncloudWizard::successfulStep()
     }
 }
 
+void OwncloudWizard::slotCustomButtonClicked(const int which)
+{
+    if (which == WizardButton::CustomButton1) {
+        // This is the 'Skip folders configuration' button
+        Q_EMIT skipFolderConfiguration();
+    } else if (which == WizardButton::CustomButton2) {
+        // Because QWizard doesn't have a way of directly going to a specific page (!!!)
+        restart();
+    }
+}
+
 void OwncloudWizard::setAuthType(DetermineAuthTypeJob::AuthType type)
 {
     _setupPage->setAuthType(type);
 
-    if (type == DetermineAuthTypeJob::OAuth) {
-        _credentialsPage = _browserCredsPage;
-    } else if (type == DetermineAuthTypeJob::LoginFlowV2) {
+    if (type == DetermineAuthTypeJob::LoginFlowV2) {
         _credentialsPage = _flow2CredsPage;
 #ifdef WITH_WEBENGINE
     } else if (type == DetermineAuthTypeJob::WebViewFlow) {
-        _credentialsPage = _webViewPage;
+        if(this->useFlow2()) {
+            _credentialsPage = _flow2CredsPage;
+        } else {
+            _credentialsPage = _webViewPage;
+        }
 #endif // WITH_WEBENGINE
     } else { // try Basic auth even for "Unknown"
         _credentialsPage = _httpCredsPage;
@@ -292,12 +329,12 @@ void OwncloudWizard::slotCurrentPageChanged(int id)
         id == WizardCommon::Page_WebView ||
 #endif // WITH_WEBENGINE
         id == WizardCommon::Page_Flow2AuthCreds) {
-        setButtonLayout({ QWizard::Stretch, QWizard::BackButton });
+        setButtonLayout({ QWizard::BackButton, QWizard::Stretch });
     } else if (id == WizardCommon::Page_AdvancedSetup) {
-        setButtonLayout({ QWizard::Stretch, QWizard::CustomButton1, QWizard::BackButton, QWizard::FinishButton });
+        setButtonLayout({ QWizard::CustomButton2, QWizard::Stretch, QWizard::CustomButton1, QWizard::FinishButton });
         setNextButtonAsDefault();
     } else {
-        setButtonLayout({ QWizard::Stretch, QWizard::BackButton, QWizard::NextButton });
+        setButtonLayout({ QWizard::BackButton, QWizard::Stretch, QWizard::NextButton });
         setNextButtonAsDefault();
     }
 
@@ -305,8 +342,8 @@ void OwncloudWizard::slotCurrentPageChanged(int id)
         emit clearPendingRequests();
     }
 
-    if (id == WizardCommon::Page_AdvancedSetup && (_credentialsPage == _browserCredsPage || _credentialsPage == _flow2CredsPage)) {
-        // For OAuth, disable the back button in the Page_AdvancedSetup because we don't want
+    if (id == WizardCommon::Page_AdvancedSetup && _credentialsPage == _flow2CredsPage) {
+        // Disable the back button in the Page_AdvancedSetup because we don't want
         // to re-open the browser.
         button(QWizard::BackButton)->setEnabled(false);
     }
@@ -369,6 +406,21 @@ void OwncloudWizard::changeEvent(QEvent *e)
     }
 
     QWizard::changeEvent(e);
+}
+
+void OwncloudWizard::hideEvent(QHideEvent *event)
+{
+    QWizard::hideEvent(event);
+#ifdef Q_OS_MACOS
+    // Closing the window on macOS hides it rather than closes it, so emit a wizardClosed here
+    emit wizardClosed();
+#endif
+}
+
+void OwncloudWizard::closeEvent(QCloseEvent *event)
+{
+    emit wizardClosed();
+    QWizard::closeEvent(event);
 }
 
 void OwncloudWizard::customizeStyle()

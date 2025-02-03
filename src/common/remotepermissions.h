@@ -59,22 +59,34 @@ public:
         PermissionsCount = IsMountedSub
     };
 
+    enum class MountedPermissionAlgorithm {
+        UseMountRootProperty,
+        WildGuessMountedSubProperty,
+    };
+
     /// null permissions
     RemotePermissions() = default;
 
     /// array with one character per permission, "" is null, " " is non-null but empty
-    QByteArray toDbValue() const;
+    [[nodiscard]] QByteArray toDbValue() const;
 
     /// output for display purposes, no defined format (same as toDbValue in practice)
-    QString toString() const;
+    [[nodiscard]] QString toString() const;
 
     /// read value that was written with toDbValue()
     static RemotePermissions fromDbValue(const QByteArray &);
 
     /// read a permissions string received from the server, never null
-    static RemotePermissions fromServerString(const QString &);
+    static RemotePermissions fromServerString(const QString &value,
+                                              MountedPermissionAlgorithm algorithm = MountedPermissionAlgorithm::WildGuessMountedSubProperty,
+                                              const QMap<QString, QString> &otherProperties = {});
 
-    bool hasPermission(Permissions p) const
+    /// read a permissions string received from the server, never null
+    static RemotePermissions fromServerString(const QString &value,
+                                              MountedPermissionAlgorithm algorithm,
+                                              const QVariantMap &otherProperties = {});
+
+    [[nodiscard]] bool hasPermission(Permissions p) const
     {
         return _value & (1 << static_cast<int>(p));
     }
@@ -87,7 +99,7 @@ public:
         _value &= ~(1 << static_cast<int>(p));
     }
 
-    bool isNull() const { return !(_value & notNullMask); }
+    [[nodiscard]] bool isNull() const { return !(_value & notNullMask); }
     friend bool operator==(RemotePermissions a, RemotePermissions b)
     {
         return a._value == b._value;
@@ -101,6 +113,13 @@ public:
     {
         return dbg << p.toString();
     }
+
+private:
+
+    template <typename T>
+    static RemotePermissions internalFromServerString(const QString &value,
+                                                      const T&otherProperties,
+                                                      MountedPermissionAlgorithm algorithm);
 };
 
 

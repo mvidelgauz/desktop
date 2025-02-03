@@ -19,12 +19,6 @@ include(DefineOptions.cmake)
 
 include(DefineInstallationPaths)
 
-if (APPLE OR WIN32)
-    set(USE_OUR_OWN_SQLITE3 TRUE)
-else()
-    find_package(SQLite3 3.8.0 REQUIRED)
-endif()
-
 include(ConfigureChecks.cmake)
 include(../common/common.cmake)
 
@@ -39,11 +33,15 @@ if(NO_RENAME_EXTENSION)
 endif()
 
 set(csync_SRCS
+  csync.h
   csync.cpp
+  csync_exclude.h
   csync_exclude.cpp
 
+  std/c_time.h
   std/c_time.cpp
 
+  vio/csync_vio_local.h
 )
 
 if (WIN32)
@@ -66,17 +64,6 @@ target_include_directories(
   PUBLIC ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/std
 )
 
-if(USE_OUR_OWN_SQLITE3)
-  message(STATUS "Using own sqlite3 version")
-  add_library(sqlite3 STATIC "${CMAKE_SOURCE_DIR}/src/3rdparty/sqlite3/sqlite3.c")
-  target_include_directories(sqlite3 PUBLIC "${CMAKE_SOURCE_DIR}/src/3rdparty/sqlite3")
-  target_link_libraries(nextcloud_csync PUBLIC sqlite3)
-else()
-  target_include_directories(nextcloud_csync PUBLIC ${SQLITE3_INCLUDE_DIR})
-  target_link_libraries(nextcloud_csync PUBLIC ${SQLITE3_LIBRARIES})
-endif()
-
-
 generate_export_header(nextcloud_csync
   EXPORT_MACRO_NAME OCSYNC_EXPORT
   EXPORT_FILE_NAME ocsynclib.h
@@ -85,13 +72,14 @@ generate_export_header(nextcloud_csync
 target_link_libraries(nextcloud_csync
   PUBLIC
   ${CSYNC_REQUIRED_LIBRARIES}
-  Qt5::Core Qt5::Concurrent
+  Qt::Core Qt::Concurrent
 )
 
 if(ZLIB_FOUND)
   target_link_libraries(nextcloud_csync PUBLIC ZLIB::ZLIB)
 endif(ZLIB_FOUND)
 
+target_link_libraries(nextcloud_csync PRIVATE SQLite::SQLite3)
 
 # For src/common/utility_mac.cpp
 if (APPLE)
@@ -112,6 +100,8 @@ set_target_properties(
       LIBRARY_OUTPUT_NAME
         ${APPLICATION_EXECUTABLE}_csync
       RUNTIME_OUTPUT_NAME
+        ${APPLICATION_EXECUTABLE}_csync
+      ARCHIVE_OUTPUT_NAME
         ${APPLICATION_EXECUTABLE}_csync
 )
 if(BUILD_OWNCLOUD_OSX_BUNDLE)
@@ -136,6 +126,10 @@ else()
   RUNTIME DESTINATION
     ${CMAKE_INSTALL_BINDIR}
   )
+endif()
+
+if (WIN32)
+    install(FILES $<TARGET_PDB_FILE:nextcloud_csync> DESTINATION bin OPTIONAL)
 endif()
 
 configure_file(config_csync.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/config_csync.h)

@@ -14,7 +14,7 @@ using namespace OCC;
 SyncJournalFileRecord journalRecord(FakeFolder &folder, const QByteArray &path)
 {
     SyncJournalFileRecord rec;
-    folder.syncJournal().getFileRecord(path, &rec);
+    [[maybe_unused]] const auto result = folder.syncJournal().getFileRecord(path, &rec);
     return rec;
 }
 
@@ -23,6 +23,14 @@ class TestBlacklist : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void testBlacklistBasic_data()
     {
         QTest::addColumn<bool>("remote");

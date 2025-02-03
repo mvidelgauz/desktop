@@ -15,12 +15,15 @@
 #ifndef MIRALL_GENERALSETTINGS_H
 #define MIRALL_GENERALSETTINGS_H
 
+#include "config.h"
+
 #include <QWidget>
 #include <QPointer>
 
 namespace OCC {
 class IgnoreListEditor;
 class SyncLogDialog;
+class AccountState;
 
 namespace Ui {
     class GeneralSettings;
@@ -37,15 +40,20 @@ class GeneralSettings : public QWidget
 public:
     explicit GeneralSettings(QWidget *parent = nullptr);
     ~GeneralSettings() override;
-    QSize sizeHint() const override;
+    [[nodiscard]] QSize sizeHint() const override;
 
 public slots:
     void slotStyleChanged();
+#if defined(BUILD_UPDATER)
+    void loadUpdateChannelsList();
+#endif
 
 private slots:
     void saveMiscSettings();
     void slotToggleLaunchOnStartup(bool);
     void slotToggleOptionalServerNotifications(bool);
+    void slotToggleChatNotifications(bool);
+    void slotToggleCallNotifications(bool);
     void slotShowInExplorerNavigationPane(bool);
     void slotIgnoreFilesEditor();
     void slotCreateDebugArchive();
@@ -53,7 +61,7 @@ private slots:
     void slotShowLegalNotice();
 #if defined(BUILD_UPDATER)
     void slotUpdateInfo();
-    void slotUpdateChannelChanged(const QString &channel);
+    void slotUpdateChannelChanged();
     void slotUpdateCheckNow();
     void slotToggleAutoUpdateCheck();
 #endif
@@ -64,6 +72,7 @@ private:
     Ui::GeneralSettings *_ui;
     QPointer<IgnoreListEditor> _ignoreEditor;
     bool _currentlyLoading = false;
+    QStringList _currentUpdateChannelList;
 };
 
 
