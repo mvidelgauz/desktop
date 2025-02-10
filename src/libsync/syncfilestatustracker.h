@@ -42,13 +42,14 @@ public slots:
     void slotPathTouched(const QString &fileName);
     // path relative to folder
     void slotAddSilentlyExcluded(const QString &folderPath);
+    void slotCheckAndRemoveSilentlyExcluded(const QString &folderPath);
 
 signals:
-    void fileStatusChanged(const QString &systemFileName, SyncFileStatus fileStatus);
+    void fileStatusChanged(const QString &systemFileName, OCC::SyncFileStatus fileStatus);
 
 private slots:
-    void slotAboutToPropagate(SyncFileItemVector &items);
-    void slotItemCompleted(const SyncFileItemPtr &item);
+    void slotAboutToPropagate(OCC::SyncFileItemVector &items);
+    void slotItemCompleted(const OCC::SyncFileItemPtr &item);
     void slotSyncFinished();
     void slotSyncEngineRunningChanged();
 
@@ -74,6 +75,7 @@ private:
     SyncEngine *_syncEngine;
 
     ProblemsMap _syncProblems;
+    ProblemsMap _syncSilentExcludes;
     QSet<QString> _dirtyPaths;
     // Counts the number direct children currently being synced (has unfinished propagation jobs).
     // We'll show a file/directory as SYNC as long as its sync count is > 0.

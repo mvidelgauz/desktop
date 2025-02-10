@@ -28,8 +28,8 @@ class PropagateRemoteMkdir : public PropagateItemJob
 {
     Q_OBJECT
     QPointer<AbstractNetworkJob> _job;
-    bool _deleteExisting;
-    PropagateUploadEncrypted *_uploadEncryptedHelper;
+    bool _deleteExisting = false;
+    PropagateUploadEncrypted *_uploadEncryptedHelper = nullptr;
     friend class PropagateDirectory; // So it can access the _item;
 public:
     PropagateRemoteMkdir(OwncloudPropagator *propagator, const SyncFileItemPtr &item);
@@ -53,7 +53,7 @@ private slots:
     void slotStartMkcolJob();
     void slotStartEncryptedMkcolJob(const QString &path, const QString &filename, quint64 size);
     void slotMkcolJobFinished();
-    void slotEncryptFolderFinished();
+    void slotEncryptFolderFinished(int status, EncryptionStatusEnums::ItemEncryptionStatus encryptionStatus);
     void success();
 
 private:

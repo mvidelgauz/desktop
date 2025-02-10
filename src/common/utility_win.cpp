@@ -18,16 +18,25 @@
 
 #include "asserts.h"
 #include "utility.h"
+#include "gui/configgui.h"
 
 #include <comdef.h>
+#include <Lmcons.h>
+#include <psapi.h>
+#include <RestartManager.h>
 #include <shlguid.h>
 #include <shlobj.h>
 #include <string>
 #include <winbase.h>
 #include <windows.h>
 #include <winerror.h>
-
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <QLibrary>
+#include <QSettings>
+#include <QTemporaryFile>
+#include <QFileInfo>
 
 extern Q_CORE_EXPORT int qt_ntfs_permission_lookup;
 
@@ -36,7 +45,73 @@ static const char runPathC[] = R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\C
 
 namespace OCC {
 
-static void setupFavLink_private(const QString &folder)
+QVector<Utility::ProcessInfosForOpenFile> Utility::queryProcessInfosKeepingFileOpen(const QString &filePath)
+{
+    QVector<ProcessInfosForOpenFile> results;
+
+    DWORD restartManagerSession = 0;
+    WCHAR restartManagerSessionKey[CCH_RM_SESSION_KEY + 1] = {0};
+    auto errorStatus = RmStartSession(&restartManagerSession, 0, restartManagerSessionKey);
+    if (errorStatus != ERROR_SUCCESS) {
+        return results;
+    }
+
+    LPCWSTR files[] = {reinterpret_cast<LPCWSTR>(filePath.utf16())};
+    errorStatus = RmRegisterResources(restartManagerSession, 1, files, 0, NULL, 0, NULL);
+    if (errorStatus != ERROR_SUCCESS) {
+        RmEndSession(restartManagerSession);
+        return results;
+    }
+
+    DWORD rebootReasons = 0;
+    UINT rmProcessInfosNeededCount = 0;
+    std::vector<RM_PROCESS_INFO> rmProcessInfos;
+    auto rmProcessInfosRequestedCount = static_cast<UINT>(rmProcessInfos.size());
+    errorStatus = RmGetList(restartManagerSession, &rmProcessInfosNeededCount, &rmProcessInfosRequestedCount, rmProcessInfos.data(), &rebootReasons);
+    
+    if (errorStatus == ERROR_MORE_DATA) {
+        rmProcessInfos.resize(rmProcessInfosNeededCount, {});
+        rmProcessInfosRequestedCount = static_cast<UINT>(rmProcessInfos.size());
+        errorStatus = RmGetList(restartManagerSession, &rmProcessInfosNeededCount, &rmProcessInfosRequestedCount, rmProcessInfos.data(), &rebootReasons);
+    }
+    
+    if (errorStatus != ERROR_SUCCESS || rmProcessInfos.empty()) {
+        RmEndSession(restartManagerSession);
+        return results;
+    }
+
+    for (size_t i = 0; i < rmProcessInfos.size(); ++i) {
+        const auto processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, rmProcessInfos[i].Process.dwProcessId);
+        if (!processHandle) {
+            continue;
+        }
+
+        FILETIME ftCreate, ftExit, ftKernel, ftUser;
+
+        if (!GetProcessTimes(processHandle, &ftCreate, &ftExit, &ftKernel, &ftUser)
+            || CompareFileTime(&rmProcessInfos[i].Process.ProcessStartTime, &ftCreate) != 0) {
+            CloseHandle(processHandle);
+            continue;
+        }
+
+        WCHAR processFullPath[MAX_PATH];
+        DWORD processFullPathLength = MAX_PATH;
+        if (QueryFullProcessImageNameW(processHandle, 0, processFullPath, &processFullPathLength) && processFullPathLength <= MAX_PATH) {
+            const auto processFullPathString = QDir::fromNativeSeparators(QString::fromWCharArray(processFullPath));
+            const QFileInfo fileInfoForProcess(processFullPathString);
+            const auto processName = fileInfoForProcess.fileName();
+            if (!processName.isEmpty()) {
+                results.push_back(Utility::ProcessInfosForOpenFile{rmProcessInfos[i].Process.dwProcessId, processName});
+            }
+        }
+        CloseHandle(processHandle);
+    }
+    RmEndSession(restartManagerSession);
+
+    return results;
+}
+
+void Utility::setupFavLink(const QString &folder)
 {
     // First create a Desktop.ini so that the folder and favorite link show our application's icon.
     QFile desktopIni(folder + QLatin1String("/Desktop.ini"));
@@ -47,7 +122,14 @@ static void setupFavLink_private(const QString &folder)
         desktopIni.open(QFile::WriteOnly);
         desktopIni.write("[.ShellClassInfo]\r\nIconResource=");
         desktopIni.write(QDir::toNativeSeparators(qApp->applicationFilePath()).toUtf8());
-        desktopIni.write(",0\r\n");
+#ifdef APPLICATION_FOLDER_ICON_INDEX
+        const auto iconIndex = APPLICATION_FOLDER_ICON_INDEX;
+#else
+        const auto iconIndex = "0";
+#endif
+        desktopIni.write(",");
+        desktopIni.write(iconIndex);
+        desktopIni.write("\r\n");
         desktopIni.close();
 
         // Set the folder as system and Desktop.ini as hidden+system for explorer to pick it.
@@ -57,38 +139,76 @@ static void setupFavLink_private(const QString &folder)
         SetFileAttributesW((wchar_t *)desktopIni.fileName().utf16(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
     }
 
-    // Windows Explorer: Place under "Favorites" (Links)
-    QString linkName;
-    QDir folderDir(QDir::fromNativeSeparators(folder));
-
     /* Use new WINAPI functions */
     PWSTR path;
-
-    if (SHGetKnownFolderPath(FOLDERID_Links, 0, nullptr, &path) == S_OK) {
-        QString links = QDir::fromNativeSeparators(QString::fromWCharArray(path));
-        linkName = QDir(links).filePath(folderDir.dirName() + QLatin1String(".lnk"));
-        CoTaskMemFree(path);
+    if (!SHGetKnownFolderPath(FOLDERID_Links, 0, nullptr, &path) == S_OK) {
+        qCWarning(lcUtility) << "SHGetKnownFolderPath for " << folder << "has failed.";
+        return;
     }
+
+    // Windows Explorer: Place under "Favorites" (Links)
+    const auto links = QDir::fromNativeSeparators(QString::fromWCharArray(path));
+    CoTaskMemFree(path);
+
+    const QDir folderDir(QDir::fromNativeSeparators(folder));
+    const QString filePath = folderDir.dirName() + QLatin1String(".lnk");
+    const auto linkName = QDir(links).filePath(filePath);
+
     qCInfo(lcUtility) << "Creating favorite link from" << folder << "to" << linkName;
-    if (!QFile::link(folder, linkName))
+    if (!QFile::link(folder, linkName)) {
         qCWarning(lcUtility) << "linking" << folder << "to" << linkName << "failed!";
+    }
 }
 
-bool hasSystemLaunchOnStartup_private(const QString &appName)
+void Utility::removeFavLink(const QString &folder)
+{
+    const QDir folderDir(folder);
+
+    // #1 Remove the Desktop.ini to reset the folder icon
+    if (!QFile::remove(folderDir.absoluteFilePath(QLatin1String("Desktop.ini")))) {
+        qCWarning(lcUtility) << "Remove Desktop.ini from" << folder
+                             << " has failed. Make sure it exists and is not locked by another process.";
+    }
+
+    // #2 Remove the system file attribute
+    const auto folderAttrs = GetFileAttributesW(folder.toStdWString().c_str());
+    if (!SetFileAttributesW(folder.toStdWString().c_str(), folderAttrs & ~FILE_ATTRIBUTE_SYSTEM)) {
+        qCWarning(lcUtility) << "Remove system file attribute failed for:" << folder;
+    }
+
+    // #3 Remove the link to this folder
+    PWSTR path;
+    if (!SHGetKnownFolderPath(FOLDERID_Links, 0, nullptr, &path) == S_OK) {
+        qCWarning(lcUtility) << "SHGetKnownFolderPath for " << folder << "has failed.";
+        return;
+    }
+
+    const QDir links(QString::fromWCharArray(path));
+    CoTaskMemFree(path);
+
+    const auto linkName = QDir(links).absoluteFilePath(folderDir.dirName() + QLatin1String(".lnk"));
+
+    qCInfo(lcUtility) << "Removing favorite link from" << folder << "to" << linkName;
+    if (!QFile::remove(linkName)) {
+        qCWarning(lcUtility) << "Removing a favorite link from" << folder << "to" << linkName << "failed.";
+    }
+}
+
+bool Utility::hasSystemLaunchOnStartup(const QString &appName)
 {
     QString runPath = QLatin1String(systemRunPathC);
     QSettings settings(runPath, QSettings::NativeFormat);
     return settings.contains(appName);
 }
 
-bool hasLaunchOnStartup_private(const QString &appName)
+bool Utility::hasLaunchOnStartup(const QString &appName)
 {
     QString runPath = QLatin1String(runPathC);
     QSettings settings(runPath, QSettings::NativeFormat);
     return settings.contains(appName);
 }
 
-void setLaunchOnStartup_private(const QString &appName, const QString &guiName, bool enable)
+void Utility::setLaunchOnStartup(const QString &appName, const QString &guiName, bool enable)
 {
     Q_UNUSED(guiName);
     QString runPath = QLatin1String(runPathC);
@@ -100,8 +220,7 @@ void setLaunchOnStartup_private(const QString &appName, const QString &guiName, 
     }
 }
 
-// TODO: Right now only detection on toggle/startup, not when windows theme is switched while nextcloud is running
-static inline bool hasDarkSystray_private()
+bool Utility::hasDarkSystray()
 {
     if(Utility::registryGetKeyValue(    HKEY_CURRENT_USER,
                                         QStringLiteral(R"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)"),
@@ -311,6 +430,50 @@ bool Utility::registryWalkSubKeys(HKEY hRootKey, const QString &subKey, const st
     return retCode != ERROR_NO_MORE_ITEMS;
 }
 
+bool Utility::registryWalkValues(HKEY hRootKey, const QString &subKey, const std::function<void(const QString &, bool *)> &callback)
+{
+    HKEY hKey;
+    REGSAM sam = KEY_QUERY_VALUE;
+    LONG result = RegOpenKeyEx(hRootKey, reinterpret_cast<LPCWSTR>(subKey.utf16()), 0, sam, &hKey);
+    ASSERT(result == ERROR_SUCCESS);
+    if (result != ERROR_SUCCESS) {
+        return false;
+    }
+
+    DWORD maxValueNameSize = 0;
+    result = RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &maxValueNameSize, nullptr, nullptr, nullptr);
+    ASSERT(result == ERROR_SUCCESS);
+    if (result != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return false;
+    }
+
+    QString valueName;
+    valueName.reserve(maxValueNameSize + 1);
+
+    DWORD retCode = ERROR_SUCCESS;
+    bool done = false;
+    for (DWORD i = 0; retCode == ERROR_SUCCESS; ++i) {
+        Q_ASSERT(unsigned(valueName.capacity()) > maxValueNameSize);
+        valueName.resize(valueName.capacity());
+        DWORD valueNameSize = valueName.size();
+        retCode = RegEnumValue(hKey, i, reinterpret_cast<LPWSTR>(valueName.data()), &valueNameSize, nullptr, nullptr, nullptr, nullptr);
+
+        ASSERT(result == ERROR_SUCCESS || retCode == ERROR_NO_MORE_ITEMS);
+        if (retCode == ERROR_SUCCESS) {
+            valueName.resize(valueNameSize);
+            callback(valueName, &done);
+
+            if (done) {
+                break;
+            }
+        }
+    }
+
+    RegCloseKey(hKey);
+    return retCode != ERROR_NO_MORE_ITEMS;
+}
+
 DWORD Utility::convertSizeToDWORD(size_t &convertVar)
 {
     if( convertVar > UINT_MAX ) {
@@ -340,12 +503,34 @@ void Utility::UnixTimeToLargeIntegerFiletime(time_t t, LARGE_INTEGER *hundredNSe
     hundredNSecs->HighPart = ll >>32;
 }
 
+bool Utility::canCreateFileInPath(const QString &path)
+{
+    Q_ASSERT(!path.isEmpty());
+    const auto pathWithSlash = !path.endsWith(QLatin1Char('/'))
+        ? path + QLatin1Char('/')
+        : path;
+    QTemporaryFile testFile(pathWithSlash + QStringLiteral("~$write-test-file-XXXXXX"));
+    return testFile.open();
+}
 
 QString Utility::formatWinError(long errorCode)
 {
     return QStringLiteral("WindowsError: %1: %2").arg(QString::number(errorCode, 16), QString::fromWCharArray(_com_error(errorCode).ErrorMessage()));
 }
 
+QString Utility::getCurrentUserName()
+{
+    TCHAR username[UNLEN + 1] = {0};
+    DWORD len = sizeof(username) / sizeof(TCHAR);
+    
+    if (!GetUserName(username, &len)) {
+        qCWarning(lcUtility) << "Could not retrieve Windows user name." << formatWinError(GetLastError());
+    }
+
+    return QString::fromWCharArray(username);
+}
+
+void Utility::registerUriHandlerForLocalEditing() { /* URI handler is registered via Nextcloud.wxs */ }
 
 Utility::NtfsPermissionLookupRAII::NtfsPermissionLookupRAII()
 {

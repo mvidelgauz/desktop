@@ -23,8 +23,10 @@
 
 #include "config.h"
 #include "configfile.h"
+#include "deletejob.h"
 #include "folderman.h"
 #include "folder.h"
+#include "encryptfolderjob.h"
 #include "theme.h"
 #include "common/syncjournalfilerecord.h"
 #include "syncengine.h"
@@ -65,7 +67,6 @@
 #include <QJsonObject>
 #include <QWidget>
 
-#include <QClipboard>
 #include <QDesktopServices>
 
 #include <QProcess>
@@ -75,11 +76,22 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 
+#ifdef HAVE_KGUIADDONS
+#include <QMimeData>
+#include <KSystemClipboard>
+#else
+#include <QClipboard>
+#endif
 
 // This is the version that is returned when the client asks for the VERSION.
 // The first number should be changed if there is an incompatible change that breaks old clients.
 // The second number should be changed when there are new features.
 #define MIRALL_SOCKET_API_VERSION "1.1"
+
+namespace {
+constexpr auto encryptJobPropertyFolder = "folder";
+constexpr auto encryptJobPropertyPath = "path";
+}
 
 namespace {
 
@@ -187,6 +199,17 @@ static QString buildMessage(const QString &verb, const QString &path, const QStr
     }
     return msg;
 }
+
+void setClipboardText(const QString &text)
+{
+#ifdef HAVE_KGUIADDONS
+    auto mimeData = new QMimeData();
+    mimeData->setText(text);
+    KSystemClipboard::instance()->setMimeData(mimeData, QClipboard::Clipboard);
+#else
+    QApplication::clipboard()->setText(text);
+#endif
+}
 }
 
 namespace OCC {
@@ -237,11 +260,8 @@ SocketApi::SocketApi(QObject *parent)
         // See issue #2388
         // + Theme::instance()->appName();
     } else if (Utility::isMac()) {
-        // This must match the code signing Team setting of the extension
-        // Example for developer builds (with ad-hoc signing identity): "" "com.owncloud.desktopclient" ".socketApi"
-        // Example for official signed packages: "9B5WD74GWJ." "com.owncloud.desktopclient" ".socketApi"
-        socketPath = SOCKETAPI_TEAM_IDENTIFIER_PREFIX APPLICATION_REV_DOMAIN ".socketApi";
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
+        socketPath = socketApiSocketPath();
         CFURLRef url = (CFURLRef)CFAutorelease((CFURLRef)CFBundleCopyBundleURL(CFBundleGetMainBundle()));
         QString bundlePath = QUrl::fromCFURL(url).path();
 
@@ -269,14 +289,19 @@ SocketApi::SocketApi(QObject *parent)
         qCWarning(lcSocketApi) << "An unexpected system detected, this probably won't work.";
     }
 
-    SocketApiServer::removeServer(socketPath);
-    QFileInfo info(socketPath);
-    if (!info.dir().exists()) {
-        bool result = info.dir().mkpath(".");
-        qCDebug(lcSocketApi) << "creating" << info.dir().path() << result;
-        if (result) {
-            QFile::setPermissions(socketPath,
-                QFile::Permissions(QFile::ReadOwner + QFile::WriteOwner + QFile::ExeOwner));
+    QLocalServer::removeServer(socketPath);
+    // Create the socket path:
+    if (!Utility::isMac()) {
+        // Not on macOS: there the directory is there, and created for us by the sandboxing
+        // environment, because we belong to an App Group.
+        QFileInfo info(socketPath);
+        if (!info.dir().exists()) {
+            bool result = info.dir().mkpath(".");
+            qCDebug(lcSocketApi) << "creating" << info.dir().path() << result;
+            if (result) {
+                QFile::setPermissions(socketPath,
+                    QFile::Permissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+            }
         }
     }
     if (!_localServer.listen(socketPath)) {
@@ -285,7 +310,7 @@ SocketApi::SocketApi(QObject *parent)
         qCInfo(lcSocketApi) << "server started, listening at " << socketPath;
     }
 
-    connect(&_localServer, &SocketApiServer::newConnection, this, &SocketApi::slotNewConnection);
+    connect(&_localServer, &QLocalServer::newConnection, this, &SocketApi::slotNewConnection);
 
     // folder watcher
     connect(FolderMan::instance(), &FolderMan::folderSyncStateChange, this, &SocketApi::slotUpdateFolderView);
@@ -302,14 +327,12 @@ SocketApi::~SocketApi()
 
 void SocketApi::slotNewConnection()
 {
-    // Note that on macOS this is not actually a line-based QIODevice, it's a SocketApiSocket which is our
-    // custom message based macOS IPC.
     QIODevice *socket = _localServer.nextPendingConnection();
 
     if (!socket) {
         return;
     }
-    qCInfo(lcSocketApi) << "New connection" << socket;
+    qCDebug(lcSocketApi) << "New connection" << socket;
     connect(socket, &QIODevice::readyRead, this, &SocketApi::slotReadSocket);
     connect(socket, SIGNAL(disconnected()), this, SLOT(onLostConnection()));
     connect(socket, &QObject::destroyed, this, &SocketApi::slotSocketDestroyed);
@@ -320,7 +343,7 @@ void SocketApi::slotNewConnection()
     for (Folder *f : FolderMan::instance()->map()) {
         if (f->canSync()) {
             QString message = buildRegisterPathMessage(removeTrailingSlash(f->path()));
-            qCInfo(lcSocketApi) << "Trying to send SocketAPI Register Path Message -->" << message << "to" << listener->socket;
+            qCDebug(lcSocketApi) << "Trying to send SocketAPI Register Path Message -->" << message << "to" << listener->socket;
             listener->sendMessage(message);
         }
     }
@@ -338,7 +361,7 @@ void SocketApi::onLostConnection()
 
 void SocketApi::slotSocketDestroyed(QObject *obj)
 {
-    auto *socket = static_cast<QIODevice *>(obj);
+    auto *socket = dynamic_cast<QIODevice *>(obj);
     _listeners.remove(socket);
 }
 
@@ -359,9 +382,9 @@ void SocketApi::slotReadSocket()
         // Make sure to normalize the input from the socket to
         // make sure that the path will match, especially on OS X.
         const QString line = QString::fromUtf8(socket->readLine().trimmed()).normalized(QString::NormalizationForm_C);
-        qCInfo(lcSocketApi) << "Received SocketAPI message <--" << line << "from" << socket;
+        qCDebug(lcSocketApi) << "Received SocketAPI message <--" << line << "from" << socket;
         const int argPos = line.indexOf(QLatin1Char(':'));
-        const QByteArray command = line.midRef(0, argPos).toUtf8().toUpper();
+        const QByteArray command = line.mid(0, argPos).toUtf8().toUpper();
         const int indexOfMethod = [&] {
             QByteArray functionWithArguments = QByteArrayLiteral("command_");
             if (command.startsWith("ASYNC_")) {
@@ -371,7 +394,7 @@ void SocketApi::slotReadSocket()
             } else {
                 functionWithArguments += command + QByteArrayLiteral("(QString,SocketListener*)");
             }
-            Q_ASSERT(staticQtMetaObject.normalizedSignature(functionWithArguments) == functionWithArguments);
+            Q_ASSERT(staticMetaObject.normalizedSignature(functionWithArguments) == functionWithArguments);
             const auto out = staticMetaObject.indexOfMethod(functionWithArguments);
             if (out == -1) {
                 listener->sendError(QStringLiteral("Function %1 not found").arg(QString::fromUtf8(functionWithArguments)));
@@ -380,9 +403,9 @@ void SocketApi::slotReadSocket()
             return out;
         }();
 
-        const auto argument = argPos != -1 ? line.midRef(argPos + 1) : QStringRef();
+        const auto argument = QString{argPos != -1 ? line.mid(argPos + 1) : QString()};
         if (command.startsWith("ASYNC_")) {
-            auto arguments = argument.split('|');
+            const auto arguments = argument.split('|');
             if (arguments.size() != 2) {
                 listener->sendError(QStringLiteral("argument count is wrong"));
                 return;
@@ -393,7 +416,7 @@ void SocketApi::slotReadSocket()
             auto jobId = arguments[0];
 
             auto socketApiJob = QSharedPointer<SocketApiJob>(
-                new SocketApiJob(jobId.toString(), listener, json), &QObject::deleteLater);
+                new SocketApiJob(jobId, listener, json), &QObject::deleteLater);
             if (indexOfMethod != -1) {
                 staticMetaObject.method(indexOfMethod)
                     .invoke(this, Qt::QueuedConnection,
@@ -404,10 +427,10 @@ void SocketApi::slotReadSocket()
                 socketApiJob->reject(QStringLiteral("command not found"));
             }
         } else if (command.startsWith("V2/")) {
-            QJsonParseError error;
+            QJsonParseError error{};
             const auto json = QJsonDocument::fromJson(argument.toUtf8(), &error).object();
             if (error.error != QJsonParseError::NoError) {
-                qCWarning(lcSocketApi()) << "Invalid json" << argument.toString() << error.errorString();
+                qCWarning(lcSocketApi()) << "Invalid json" << argument << error.errorString();
                 listener->sendError(error.errorString());
                 return;
             }
@@ -421,12 +444,19 @@ void SocketApi::slotReadSocket()
                                        << "with argument:" << argument;
                 socketApiJob->failure(QStringLiteral("command not found"));
             }
+        } else if (command.startsWith("ENCRYPT")) {
+            if (indexOfMethod != -1) {
+                ASSERT(thread() == QThread::currentThread())
+                staticMetaObject.method(indexOfMethod)
+                    .invoke(this, Qt::QueuedConnection, Q_ARG(QString, argument),
+                            Q_ARG(SocketListener *, listener.data()));
+            }
         } else {
             if (indexOfMethod != -1) {
                 // to ensure that listener is still valid we need to call it with Qt::DirectConnection
                 ASSERT(thread() == QThread::currentThread())
                 staticMetaObject.method(indexOfMethod)
-                    .invoke(this, Qt::DirectConnection, Q_ARG(QString, argument.toString()),
+                    .invoke(this, Qt::DirectConnection, Q_ARG(QString, argument),
                         Q_ARG(SocketListener *, listener.data()));
             }
         }
@@ -442,7 +472,7 @@ void SocketApi::slotRegisterPath(const QString &alias)
     Folder *f = FolderMan::instance()->folder(alias);
     if (f) {
         const QString message = buildRegisterPathMessage(removeTrailingSlash(f->path()));
-        for (const auto &listener : qAsConst(_listeners)) {
+        for (const auto &listener : std::as_const(_listeners)) {
             qCInfo(lcSocketApi) << "Trying to send SocketAPI Register Path Message -->" << message << "to" << listener->socket;
             listener->sendMessage(message);
         }
@@ -489,7 +519,7 @@ void SocketApi::slotUpdateFolderView(Folder *f)
 
 void SocketApi::broadcastMessage(const QString &msg, bool doWait)
 {
-    for (const auto &listener : qAsConst(_listeners)) {
+    for (const auto &listener : std::as_const(_listeners)) {
         listener->sendMessage(msg, doWait);
     }
 }
@@ -497,10 +527,66 @@ void SocketApi::broadcastMessage(const QString &msg, bool doWait)
 void SocketApi::processFileActivityRequest(const QString &localFile)
 {
     const auto fileData = FileData::get(localFile);
-    emit fileActivityCommandReceived(fileData.serverRelativePath, fileData.localPath);
+    emit fileActivityCommandReceived(fileData.localPath);
 }
 
-void SocketApi::processShareRequest(const QString &localFile, SocketListener *listener, ShareDialogStartPage startPage)
+void SocketApi::processEncryptRequest(const QString &localFile)
+{
+    Q_ASSERT(QFileInfo(localFile).isDir());
+
+    const auto fileData = FileData::get(localFile);
+
+    const auto folder = fileData.folder;
+    Q_ASSERT(folder);
+
+    const auto account = folder->accountState()->account();
+    Q_ASSERT(account);
+
+    const auto rec = fileData.journalRecord();
+    Q_ASSERT(rec.isValid());
+
+    if (!account->e2e() || !account->e2e()->isInitialized()) {
+        const int ret = QMessageBox::critical(
+            nullptr,
+            tr("Failed to encrypt folder at \"%1\"").arg(fileData.folderRelativePath),
+            tr("The account %1 does not have end-to-end encryption configured. "
+               "Please configure this in your account settings to enable folder encryption.").arg(account->prettyName()),
+            QMessageBox::Ok
+            );
+        Q_UNUSED(ret)
+        return;
+    }
+
+    auto path = rec._path;
+    // Folder records have directory paths in Foo/Bar/ convention...
+    // But EncryptFolderJob expects directory path Foo/Bar convention
+    const auto choppedPath = Utility::noTrailingSlashPath(Utility::noLeadingSlashPath(path));
+
+    auto job = new OCC::EncryptFolderJob(account, folder->journalDb(), choppedPath, choppedPath, folder->remotePath(), rec.numericFileId());
+    job->setParent(this);
+    connect(job, &OCC::EncryptFolderJob::finished, this, [fileData, job](const int status) {
+        if (status == OCC::EncryptFolderJob::Error) {
+            const int ret = QMessageBox::critical(
+                nullptr,
+                tr("Failed to encrypt folder"),
+                tr("Could not encrypt the following folder: \"%1\".\n\n"
+                   "Server replied with error: %2").arg(fileData.folderRelativePath, job->errorString()),
+                QMessageBox::Ok
+            );
+            Q_UNUSED(ret)
+        } else {
+            const int ret = QMessageBox::information(nullptr,
+                                                     tr("Folder encrypted successfully").arg(fileData.folderRelativePath),
+                                                     tr("The following folder was encrypted successfully: \"%1\"").arg(fileData.folderRelativePath));
+            Q_UNUSED(ret)
+        }
+    });
+    job->setProperty(encryptJobPropertyFolder, QVariant::fromValue(folder));
+    job->setProperty(encryptJobPropertyPath, QVariant::fromValue(path));
+    job->start();
+}
+
+void SocketApi::processShareRequest(const QString &localFile, SocketListener *listener)
 {
     auto theme = Theme::instance();
 
@@ -525,6 +611,13 @@ void SocketApi::processShareRequest(const QString &localFile, SocketListener *li
             return;
         }
 
+        if (!fileData.journalRecord().e2eMangledName().isEmpty()) {
+            // we can not share an encrypted file or a subfolder under encrypted root foolder
+            const QString message = QLatin1String("SHARE:NOP:") + QDir::toNativeSeparators(localFile);
+            listener->sendMessage(message);
+            return;
+        }
+
         auto &remotePath = fileData.serverRelativePath;
 
         // Can't share root folder
@@ -537,8 +630,14 @@ void SocketApi::processShareRequest(const QString &localFile, SocketListener *li
         const QString message = QLatin1String("SHARE:OK:") + QDir::toNativeSeparators(localFile);
         listener->sendMessage(message);
 
-        emit shareCommandReceived(remotePath, fileData.localPath, startPage);
+        emit shareCommandReceived(fileData.localPath);
     }
+}
+
+void SocketApi::processLeaveShareRequest(const QString &localFile, SocketListener *listener)
+{
+    Q_UNUSED(listener)
+    FolderMan::instance()->leaveShare(QDir::fromNativeSeparators(localFile));
 }
 
 void SocketApi::broadcastStatusPushMessage(const QString &systemPath, SyncFileStatus fileStatus)
@@ -546,7 +645,7 @@ void SocketApi::broadcastStatusPushMessage(const QString &systemPath, SyncFileSt
     QString msg = buildMessage(QLatin1String("STATUS"), systemPath, fileStatus.toSocketAPIString());
     Q_ASSERT(!systemPath.endsWith('/'));
     uint directoryHash = qHash(systemPath.left(systemPath.lastIndexOf('/')));
-    for (const auto &listener : qAsConst(_listeners)) {
+    for (const auto &listener : std::as_const(_listeners)) {
         listener->sendMessageIfDirectoryMonitored(msg, directoryHash);
     }
 }
@@ -581,7 +680,12 @@ void SocketApi::command_RETRIEVE_FILE_STATUS(const QString &argument, SocketList
 
 void SocketApi::command_SHARE(const QString &localFile, SocketListener *listener)
 {
-    processShareRequest(localFile, listener, ShareDialogStartPage::UsersAndGroups);
+    processShareRequest(localFile, listener);
+}
+
+void SocketApi::command_LEAVESHARE(const QString &localFile, SocketListener *listener)
+{
+    processLeaveShareRequest(localFile, listener);
 }
 
 void SocketApi::command_ACTIVITY(const QString &localFile, SocketListener *listener)
@@ -591,9 +695,11 @@ void SocketApi::command_ACTIVITY(const QString &localFile, SocketListener *liste
     processFileActivityRequest(localFile);
 }
 
-void SocketApi::command_MANAGE_PUBLIC_LINKS(const QString &localFile, SocketListener *listener)
+void SocketApi::command_ENCRYPT(const QString &localFile, SocketListener *listener)
 {
-    processShareRequest(localFile, listener, ShareDialogStartPage::PublicLinks);
+    Q_UNUSED(listener);
+
+    processEncryptRequest(localFile);
 }
 
 void SocketApi::command_VERSION(const QString &, SocketListener *listener)
@@ -649,12 +755,13 @@ class GetOrCreatePublicLinkShare : public QObject
 {
     Q_OBJECT
 public:
-    GetOrCreatePublicLinkShare(const AccountPtr &account, const QString &localFile,
+    GetOrCreatePublicLinkShare(const AccountPtr &account, const QString &localFile, const bool isSecureFileDropOnlyFolder,
         QObject *parent)
         : QObject(parent)
         , _account(account)
         , _shareManager(account)
         , _localFile(localFile)
+        , _isSecureFileDropOnlyFolder(isSecureFileDropOnlyFolder)
     {
         connect(&_shareManager, &ShareManager::sharesFetched,
             this, &GetOrCreatePublicLinkShare::sharesFetched);
@@ -673,7 +780,7 @@ public:
     }
 
 private slots:
-    void sharesFetched(const QList<QSharedPointer<Share>> &shares)
+    void sharesFetched(const QList<OCC::SharePtr> &shares)
     {
         auto shareName = SocketApi::tr("Context menu share");
 
@@ -691,10 +798,14 @@ private slots:
 
         // otherwise create a new one
         qCDebug(lcPublicLink) << "Creating new share";
-        _shareManager.createLinkShare(_localFile, shareName, QString());
+        if (_isSecureFileDropOnlyFolder) {
+            _shareManager.createSecureFileDropShare(_localFile, shareName, QString());
+        } else {
+            _shareManager.createLinkShare(_localFile, shareName, QString());
+        }
     }
 
-    void linkShareCreated(const QSharedPointer<LinkShare> &share)
+    void linkShareCreated(const QSharedPointer<OCC::LinkShare> &share)
     {
         qCDebug(lcPublicLink) << "New share created";
         success(share->getLink().toString());
@@ -752,6 +863,7 @@ private:
     AccountPtr _account;
     ShareManager _shareManager;
     QString _localFile;
+    bool _isSecureFileDropOnlyFolder = false;
 };
 
 #else
@@ -772,26 +884,25 @@ public:
 
 #endif
 
-void SocketApi::command_COPY_PUBLIC_LINK(const QString &localFile, SocketListener *)
+void SocketApi::command_COPY_SECUREFILEDROP_LINK(const QString &localFile, SocketListener *)
 {
-    auto fileData = FileData::get(localFile);
-    if (!fileData.folder)
+    const auto fileData = FileData::get(localFile);
+    if (!fileData.folder) {
         return;
+    }
 
-    AccountPtr account = fileData.folder->accountState()->account();
-    auto job = new GetOrCreatePublicLinkShare(account, fileData.serverRelativePath, this);
-    connect(job, &GetOrCreatePublicLinkShare::done, this,
-        [](const QString &url) { copyUrlToClipboard(url); });
-    connect(job, &GetOrCreatePublicLinkShare::error, this,
-        [=]() { emit shareCommandReceived(fileData.serverRelativePath, fileData.localPath, ShareDialogStartPage::PublicLinks); });
-    job->run();
+    const auto account = fileData.folder->accountState()->account();
+    const auto getOrCreatePublicLinkShareJob = new GetOrCreatePublicLinkShare(account, fileData.serverRelativePath, true, this);
+    connect(getOrCreatePublicLinkShareJob, &GetOrCreatePublicLinkShare::done, this, [](const QString &url) { copyUrlToClipboard(url); });
+    connect(getOrCreatePublicLinkShareJob, &GetOrCreatePublicLinkShare::error, this, [=]() { emit shareCommandReceived(fileData.localPath); });
+    getOrCreatePublicLinkShareJob->run();
 }
 
 // Windows Shell / Explorer pinning fallbacks, see issue: https://github.com/nextcloud/desktop/issues/1599
 #ifdef Q_OS_WIN
 void SocketApi::command_COPYASPATH(const QString &localFile, SocketListener *)
 {
-    QApplication::clipboard()->setText(localFile);
+    setClipboardText(localFile);
 }
 
 void SocketApi::command_OPENNEWWINDOW(const QString &localFile, SocketListener *)
@@ -884,7 +995,7 @@ void SocketApi::command_MAKE_ONLINE_ONLY(const QString &filesArg, SocketListener
 
 void SocketApi::copyUrlToClipboard(const QString &link)
 {
-    QApplication::clipboard()->setText(link);
+    setClipboardText(link);
 }
 
 void SocketApi::command_RESOLVE_CONFLICT(const QString &localFile, SocketListener *)
@@ -937,8 +1048,8 @@ void SocketApi::command_MOVE_ITEM(const QString &localFile, SocketListener *)
     // If the parent doesn't accept new files, go to the root of the sync folder
     QFileInfo fileInfo(localFile);
     const auto parentRecord = parentDir.journalRecord();
-    if ((fileInfo.isFile() && !parentRecord._remotePerm.hasPermission(RemotePermissions::CanAddFile))
-        || (fileInfo.isDir() && !parentRecord._remotePerm.hasPermission(RemotePermissions::CanAddSubDirectories))) {
+    if ((FileSystem::isFile(localFile) && !parentRecord._remotePerm.hasPermission(RemotePermissions::CanAddFile))
+        || (FileSystem::isDir(localFile) && !parentRecord._remotePerm.hasPermission(RemotePermissions::CanAddSubDirectories))) {
         defaultDirAndName = QFileInfo(defaultDirAndName).fileName();
     }
 
@@ -958,10 +1069,53 @@ void SocketApi::command_MOVE_ITEM(const QString &localFile, SocketListener *)
     solver.setRemoteVersionFilename(target);
 }
 
+void SocketApi::command_LOCK_FILE(const QString &localFile, SocketListener *listener)
+{
+    Q_UNUSED(listener)
+
+    setFileLock(localFile, SyncFileItem::LockStatus::LockedItem);
+}
+
+void SocketApi::command_UNLOCK_FILE(const QString &localFile, SocketListener *listener)
+{
+    Q_UNUSED(listener)
+
+    setFileLock(localFile, SyncFileItem::LockStatus::UnlockedItem);
+}
+
+void SocketApi::setFileLock(const QString &localFile, const SyncFileItem::LockStatus lockState) const
+{
+    const auto fileData = FileData::get(localFile);
+
+    const auto shareFolder = fileData.folder;
+    if (!shareFolder || !shareFolder->accountState()->isConnected()) {
+        return;
+    }
+
+    const auto record = fileData.journalRecord();
+
+    if (lockState == SyncFileItem::LockStatus::UnlockedItem &&
+        !shareFolder->accountState()->account()->fileCanBeUnlocked(shareFolder->journalDb(), fileData.folderRelativePath)) {
+        return;
+    }
+
+    shareFolder->accountState()->account()->setLockFileState(fileData.serverRelativePath,
+                                                             shareFolder->remotePathTrailingSlash(),
+                                                             shareFolder->path(),
+                                                             record._etag,
+                                                             shareFolder->journalDb(),
+                                                             lockState,
+                                                             (lockState == SyncFileItem::LockStatus::UnlockedItem) ? static_cast<SyncFileItem::LockOwnerType>(record._lockstate._lockOwnerType) : SyncFileItem::LockOwnerType::UserLock);
+
+    shareFolder->journalDb()->schedulePathForRemoteDiscovery(fileData.serverRelativePath);
+    shareFolder->scheduleThisFolderSoon();
+}
+
 void SocketApi::command_V2_LIST_ACCOUNTS(const QSharedPointer<SocketApiJobV2> &job) const
 {
     QJsonArray out;
-    for (auto acc : AccountManager::instance()->accounts()) {
+    const auto accounts = AccountManager::instance()->accounts();
+    for (auto acc : accounts) {
         // TODO: Use uuid once https://github.com/owncloud/client/pull/8397 is merged
         out << QJsonObject({ { "name", acc->account()->displayName() }, { "id", acc->account()->id() } });
     }
@@ -997,25 +1151,30 @@ void SocketApi::command_GET_STRINGS(const QString &argument, SocketListener *lis
         { "EMAIL_PRIVATE_LINK_MENU_TITLE", tr("Send private link by email …") },
         { "CONTEXT_MENU_ICON", APPLICATION_ICON_NAME },
     } };
-    listener->sendMessage(QString("GET_STRINGS:BEGIN"));
+    listener->sendMessage(QStringLiteral("GET_STRINGS:BEGIN"));
     for (const auto& key_value : strings) {
         if (argument.isEmpty() || argument == QLatin1String(key_value.first)) {
-            listener->sendMessage(QString("STRING:%1:%2").arg(key_value.first, key_value.second));
+            listener->sendMessage(QStringLiteral("STRING:%1:%2").arg(key_value.first, key_value.second));
         }
     }
-    listener->sendMessage(QString("GET_STRINGS:END"));
+    listener->sendMessage(QStringLiteral("GET_STRINGS:END"));
 }
 
-void SocketApi::sendSharingContextMenuOptions(const FileData &fileData, SocketListener *listener, bool enabled)
+void SocketApi::sendSharingContextMenuOptions(const FileData &fileData, SocketListener *listener, SharingContextItemEncryptedFlag itemEncryptionFlag, SharingContextItemRootEncryptedFolderFlag rootE2eeFolderFlag)
 {
-    auto record = fileData.journalRecord();
-    bool isOnTheServer = record.isValid();
-    auto flagString = isOnTheServer && enabled ? QLatin1String("::") : QLatin1String(":d:");
+    const auto record = fileData.journalRecord();
+    const auto isOnTheServer = record.isValid();
+    const auto isSecureFileDropSupported = rootE2eeFolderFlag == SharingContextItemRootEncryptedFolderFlag::RootEncryptedFolder && fileData.folder->accountState()->account()->secureFileDropSupported();
+    const auto flagString = isOnTheServer && (itemEncryptionFlag == SharingContextItemEncryptedFlag::NotEncryptedItem || isSecureFileDropSupported) ? QLatin1String("::") : QLatin1String(":d:");
 
     auto capabilities = fileData.folder->accountState()->account()->capabilities();
     auto theme = Theme::instance();
     if (!capabilities.shareAPI() || !(theme->userGroupSharing() || (theme->linkSharing() && capabilities.sharePublicLink())))
         return;
+
+    if (record._isShared && !record._sharedByMe) {
+        listener->sendMessage(QLatin1String("MENU_ITEM:LEAVESHARE") + flagString + tr("Leave this share"));
+    }
 
     // If sharing is globally disabled, do not show any sharing entries.
     // If there is no permission to share for this file, add a disabled entry saying so
@@ -1023,28 +1182,82 @@ void SocketApi::sendSharingContextMenuOptions(const FileData &fileData, SocketLi
         listener->sendMessage(QLatin1String("MENU_ITEM:DISABLED:d:") + (!record.isDirectory() ? tr("Resharing this file is not allowed") : tr("Resharing this folder is not allowed")));
     } else {
         listener->sendMessage(QLatin1String("MENU_ITEM:SHARE") + flagString + tr("Share options"));
-
-        // Do we have public links?
-        bool publicLinksEnabled = theme->linkSharing() && capabilities.sharePublicLink();
-
-        // Is is possible to create a public link without user choices?
-        bool canCreateDefaultPublicLink = publicLinksEnabled
-            && !capabilities.sharePublicLinkEnforceExpireDate()
-            && !capabilities.sharePublicLinkAskOptionalPassword()
-            && !capabilities.sharePublicLinkEnforcePassword();
-
-        if (canCreateDefaultPublicLink) {
-            listener->sendMessage(QLatin1String("MENU_ITEM:COPY_PUBLIC_LINK") + flagString + tr("Copy public link"));
-        } else if (publicLinksEnabled) {
-            listener->sendMessage(QLatin1String("MENU_ITEM:MANAGE_PUBLIC_LINKS") + flagString + tr("Copy public link"));
-        }
     }
 
-    listener->sendMessage(QLatin1String("MENU_ITEM:COPY_PRIVATE_LINK") + flagString + tr("Copy internal link"));
+    if (itemEncryptionFlag == SharingContextItemEncryptedFlag::NotEncryptedItem) {
+        listener->sendMessage(QLatin1String("MENU_ITEM:COPY_PRIVATE_LINK") + flagString + tr("Copy internal link"));
+    }
 
     // Disabled: only providing email option for private links would look odd,
     // and the copy option is more general.
     //listener->sendMessage(QLatin1String("MENU_ITEM:EMAIL_PRIVATE_LINK") + flagString + tr("Send private link by email …"));
+}
+
+void SocketApi::sendEncryptFolderCommandMenuEntries(const QFileInfo &fileInfo,
+                                                    const FileData &fileData,
+                                                    const bool isE2eEncryptedPath,
+                                                    const OCC::SocketListener* const listener) const
+{
+    if (!listener ||
+            !fileData.folder ||
+            !fileData.folder->accountState() ||
+            !fileData.folder->accountState()->account() ||
+            !fileData.folder->accountState()->account()->capabilities().clientSideEncryptionAvailable() ||
+            !FileSystem::isDir(fileInfo.absoluteFilePath()) ||
+            isE2eEncryptedPath ||
+            !fileData.isFolderEmpty()) {
+        return;
+    }
+
+    bool anyAncestorEncrypted = false;
+    auto ancestor = fileData.parentFolder();
+    while (ancestor.journalRecord().isValid()) {
+        if (ancestor.journalRecord().isE2eEncrypted()) {
+            anyAncestorEncrypted = true;
+            break;
+        }
+
+        ancestor = ancestor.parentFolder();
+    }
+
+    if (!anyAncestorEncrypted && !fileData.parentFolder().journalRecord().isValid()) {
+        const auto isOnTheServer = fileData.journalRecord().isValid();
+        const auto flagString = isOnTheServer ? QLatin1String("::") : QLatin1String(":d:");
+        listener->sendMessage(QStringLiteral("MENU_ITEM:ENCRYPT") + flagString + tr("Encrypt"));
+    }
+}
+
+void SocketApi::sendLockFileCommandMenuEntries(const QFileInfo &fileInfo,
+                                               Folder* const syncFolder,
+                                               const FileData &fileData,
+                                               const OCC::SocketListener* const listener) const
+{
+    if (!FileSystem::isDir(fileInfo.absoluteFilePath()) && syncFolder->accountState()->account()->capabilities().filesLockAvailable()) {
+        if (syncFolder->accountState()->account()->fileLockStatus(syncFolder->journalDb(), fileData.folderRelativePath) == SyncFileItem::LockStatus::UnlockedItem) {
+            listener->sendMessage(QLatin1String("MENU_ITEM:LOCK_FILE::") + tr("Lock file"));
+        } else {
+            if (syncFolder->accountState()->account()->fileCanBeUnlocked(syncFolder->journalDb(), fileData.folderRelativePath)) {
+                listener->sendMessage(QLatin1String("MENU_ITEM:UNLOCK_FILE::") + tr("Unlock file"));
+            }
+        }
+    }
+}
+
+void SocketApi::sendLockFileInfoMenuEntries(const QFileInfo &fileInfo,
+                                            Folder * const syncFolder,
+                                            const FileData &fileData,
+                                            const SocketListener * const listener,
+                                            const SyncJournalFileRecord &record) const
+{
+    static constexpr auto SECONDS_PER_MINUTE = 60;
+    if (!FileSystem::isDir(fileInfo.absoluteFilePath()) && syncFolder->accountState()->account()->capabilities().filesLockAvailable() &&
+            syncFolder->accountState()->account()->fileLockStatus(syncFolder->journalDb(), fileData.folderRelativePath) == SyncFileItem::LockStatus::LockedItem) {
+        listener->sendMessage(QLatin1String("MENU_ITEM:LOCKED_FILE_OWNER:d:") + tr("Locked by %1").arg(record._lockstate._lockOwnerDisplayName));
+        const auto lockExpirationTime = record._lockstate._lockTime + record._lockstate._lockTimeout;
+        const auto remainingTime = QDateTime::currentDateTime().secsTo(QDateTime::fromSecsSinceEpoch(lockExpirationTime));
+        const auto remainingTimeInMinute = static_cast<int>(remainingTime > 0 ? remainingTime / SECONDS_PER_MINUTE : 0);
+        listener->sendMessage(QLatin1String("MENU_ITEM:LOCKED_FILE_DATE:d:") + tr("Expires in %1 minutes", "remaining time before lock expires", remainingTimeInMinute).arg(remainingTimeInMinute));
+    }
 }
 
 SocketApi::FileData SocketApi::FileData::get(const QString &localFile)
@@ -1078,6 +1291,15 @@ QString SocketApi::FileData::folderRelativePathNoVfsSuffix() const
     return result;
 }
 
+bool SocketApi::FileData::isFolderEmpty() const
+{
+    if (FileSystem::isDir(localPath)) {
+        const auto nativeFolder = QDir{localPath};
+        return nativeFolder.isEmpty();
+    }
+    return false;
+}
+
 SyncFileStatus SocketApi::FileData::syncFileStatus() const
 {
     if (!folder)
@@ -1090,7 +1312,9 @@ SyncJournalFileRecord SocketApi::FileData::journalRecord() const
     SyncJournalFileRecord record;
     if (!folder)
         return record;
-    folder->journalDb()->getFileRecord(folderRelativePath, &record);
+    if (!folder->journalDb()->getFileRecord(folderRelativePath, &record)) {
+        qCWarning(lcSocketApi) << "Failed to get journal record for path" << folderRelativePath;
+    }
     return record;
 }
 
@@ -1101,7 +1325,7 @@ SocketApi::FileData SocketApi::FileData::parentFolder() const
 
 void SocketApi::command_GET_MENU_ITEMS(const QString &argument, OCC::SocketListener *listener)
 {
-    listener->sendMessage(QString("GET_MENU_ITEMS:BEGIN"));
+    listener->sendMessage(QStringLiteral("GET_MENU_ITEMS:BEGIN"), true);
     const QStringList files = split(argument);
 
     // Find the common sync folder.
@@ -1129,23 +1353,30 @@ void SocketApi::command_GET_MENU_ITEMS(const QString &argument, OCC::SocketListe
         FileData fileData = FileData::get(argument);
         const auto record = fileData.journalRecord();
         const bool isOnTheServer = record.isValid();
-        const auto isE2eEncryptedPath = fileData.journalRecord()._isE2eEncrypted || !fileData.journalRecord()._e2eMangledName.isEmpty();
+        const auto isE2eEncryptedPath = fileData.journalRecord().isE2eEncrypted() || !fileData.journalRecord()._e2eMangledName.isEmpty();
+        const auto isE2eEncryptedRootFolder = fileData.journalRecord().isE2eEncrypted() && fileData.journalRecord()._e2eMangledName.isEmpty();
         auto flagString = isOnTheServer && !isE2eEncryptedPath ? QLatin1String("::") : QLatin1String(":d:");
 
         const QFileInfo fileInfo(fileData.localPath);
-        if (!fileInfo.isDir()) {
+        sendLockFileInfoMenuEntries(fileInfo, syncFolder, fileData, listener, record);
+
+        if (!FileSystem::isDir(fileData.localPath)) {
             listener->sendMessage(QLatin1String("MENU_ITEM:ACTIVITY") + flagString + tr("Activity"));
         }
 
         DirectEditor* editor = getDirectEditorForLocalFile(fileData.localPath);
         if (editor) {
             //listener->sendMessage(QLatin1String("MENU_ITEM:EDIT") + flagString + tr("Edit via ") + editor->name());
-            listener->sendMessage(QLatin1String("MENU_ITEM:EDIT") + flagString + tr("Edit"));
+            listener->sendMessage(QLatin1String("MENU_ITEM:EDIT") + flagString + tr("Open in browser"));
         } else {
             listener->sendMessage(QLatin1String("MENU_ITEM:OPEN_PRIVATE_LINK") + flagString + tr("Open in browser"));
         }
 
-        sendSharingContextMenuOptions(fileData, listener, !isE2eEncryptedPath);
+        sendEncryptFolderCommandMenuEntries(fileInfo, fileData, isE2eEncryptedPath, listener);
+        sendLockFileCommandMenuEntries(fileInfo, syncFolder, fileData, listener);
+        const auto itemEncryptionFlag = isE2eEncryptedPath ? SharingContextItemEncryptedFlag::EncryptedItem : SharingContextItemEncryptedFlag::NotEncryptedItem;
+        const auto rootE2eeFolderFlag = isE2eEncryptedRootFolder ? SharingContextItemRootEncryptedFolderFlag::RootEncryptedFolder : SharingContextItemRootEncryptedFolderFlag::NonRootEncryptedFolder;
+        sendSharingContextMenuOptions(fileData, listener, itemEncryptionFlag, rootE2eeFolderFlag);
 
         // Conflict files get conflict resolution actions
         bool isConflict = Utility::isConflictFile(fileData.folderRelativePath);
@@ -1207,7 +1438,7 @@ void SocketApi::command_GET_MENU_ITEMS(const QString &argument, OCC::SocketListe
         };
         for (const auto &file : files) {
             auto fileData = FileData::get(file);
-            auto availability = syncFolder->vfs().availability(fileData.folderRelativePath);
+            auto availability = syncFolder->vfs().availability(fileData.folderRelativePath, Vfs::AvailabilityRecursivity::NotRecursiveAvailability);
             if (!availability) {
                 if (availability.error() == Vfs::AvailabilityError::DbError)
                     availability = VfsItemAvailability::Mixed;
@@ -1225,9 +1456,11 @@ void SocketApi::command_GET_MENU_ITEMS(const QString &argument, OCC::SocketListe
         auto makePinContextMenu = [&](bool makeAvailableLocally, bool freeSpace) {
             listener->sendMessage(QLatin1String("MENU_ITEM:CURRENT_PIN:d:")
                 + Utility::vfsCurrentAvailabilityText(*combined));
-            listener->sendMessage(QLatin1String("MENU_ITEM:MAKE_AVAILABLE_LOCALLY:")
-                + (makeAvailableLocally ? QLatin1String(":") : QLatin1String("d:"))
-                + Utility::vfsPinActionText());
+            if (!Theme::instance()->enforceVirtualFilesSyncFolder()) {
+                listener->sendMessage(QLatin1String("MENU_ITEM:MAKE_AVAILABLE_LOCALLY:")
+                    + (makeAvailableLocally ? QLatin1String(":") : QLatin1String("d:")) + Utility::vfsPinActionText());
+            }
+            
             listener->sendMessage(QLatin1String("MENU_ITEM:MAKE_ONLINE_ONLY:")
                 + (freeSpace ? QLatin1String(":") : QLatin1String("d:"))
                 + Utility::vfsFreeSpaceActionText());
@@ -1250,7 +1483,7 @@ void SocketApi::command_GET_MENU_ITEMS(const QString &argument, OCC::SocketListe
         }
     }
 
-    listener->sendMessage(QString("GET_MENU_ITEMS:END"));
+    listener->sendMessage(QStringLiteral("GET_MENU_ITEMS:END"));
 }
 
 DirectEditor* SocketApi::getDirectEditorForLocalFile(const QString &localFile)
@@ -1368,7 +1601,7 @@ void SocketApi::command_ASYNC_WAIT_FOR_WIDGET_SIGNAL(const QSharedPointer<Socket
         return;
     }
 
-    ListenerClosure *closure = new ListenerClosure([job]() { job->resolve("signal emitted"); });
+    auto closure = new ListenerClosure([job]() { job->resolve("signal emitted"); });
 
     auto signalSignature = arguments["signalSignature"].toString();
     signalSignature.prepend("2");

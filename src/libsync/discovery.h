@@ -49,68 +49,7 @@ class ProcessDirectoryJob : public QObject
 {
     Q_OBJECT
 
-    struct PathTuple;
 public:
-    enum QueryMode {
-        NormalQuery,
-        ParentDontExist, // Do not query this folder because it does not exist
-        ParentNotChanged, // No need to query this folder because it has not changed from what is in the DB
-        InBlackList // Do not query this folder because it is in the blacklist (remote entries only)
-    };
-    Q_ENUM(QueryMode)
-
-    /** For creating the root job
-     *
-     * The base pin state is used if the root dir's pin state can't be retrieved.
-     */
-    explicit ProcessDirectoryJob(DiscoveryPhase *data, PinState basePinState,
-        qint64 lastSyncTimestamp, QObject *parent)
-        : QObject(parent)
-        , _lastSyncTimestamp(lastSyncTimestamp)
-        , _discoveryData(data)
-    {
-        computePinState(basePinState);
-    }
-
-    /// For creating subjobs
-    explicit ProcessDirectoryJob(const PathTuple &path, const SyncFileItemPtr &dirItem,
-        QueryMode queryLocal, QueryMode queryServer, qint64 lastSyncTimestamp,
-        ProcessDirectoryJob *parent)
-        : QObject(parent)
-        , _dirItem(dirItem)
-        , _lastSyncTimestamp(lastSyncTimestamp)
-        , _queryServer(queryServer)
-        , _queryLocal(queryLocal)
-        , _discoveryData(parent->_discoveryData)
-        , _currentFolder(path)
-    {
-        computePinState(parent->_pinState);
-    }
-
-    void start();
-    /** Start up to nbJobs, return the number of job started; emit finished() when done */
-    int processSubJobs(int nbJobs);
-
-    void setInsideEncryptedTree(bool isInsideEncryptedTree)
-    {
-        _isInsideEncryptedTree = isInsideEncryptedTree;
-    }
-
-    bool isInsideEncryptedTree() const
-    {
-        return _isInsideEncryptedTree;
-    }
-
-    SyncFileItemPtr _dirItem;
-
-private:
-    struct Entries
-    {
-        QString nameOverride;
-        SyncJournalFileRecord dbEntry;
-        RemoteInfo serverEntry;
-        LocalInfo localEntry;
-    };
 
     /** Structure representing a path during discovery. A same path may have different value locally
      * or on the server in case of renames.
@@ -125,8 +64,7 @@ private:
      *     local:    A/Y/file
      *     server:   B/X/file
      */
-    struct PathTuple
-    {
+    struct PathTuple {
         QString _original; // Path as in the DB (before the sync)
         QString _target; // Path that will be the result after the sync (and will be in the DB)
         QString _server; // Path on the server (before the sync)
@@ -135,7 +73,7 @@ private:
         {
             return base.isEmpty() ? name : base + QLatin1Char('/') + name;
         }
-        PathTuple addName(const QString &name) const
+        [[nodiscard]] PathTuple addName(const QString &name) const
         {
             PathTuple result;
             result._original = pathAppend(_original, name);
@@ -150,7 +88,54 @@ private:
         }
     };
 
-    bool checkForInvalidFileName(const PathTuple &path, const std::map<QString, Entries> &entries, Entries &entry);
+    enum QueryMode {
+        NormalQuery,
+        ParentDontExist, // Do not query this folder because it does not exist
+        ParentNotChanged, // No need to query this folder because it has not changed from what is in the DB
+        InBlackList // Do not query this folder because it is in the blacklist (remote entries only)
+    };
+    Q_ENUM(QueryMode)
+
+    /** For creating the root job
+     *
+     * The base pin state is used if the root dir's pin state can't be retrieved.
+     */
+    explicit ProcessDirectoryJob(DiscoveryPhase *data, PinState basePinState,
+        qint64 lastSyncTimestamp, QObject *parent);
+
+    /// For creating subjobs
+    explicit ProcessDirectoryJob(const PathTuple &path, const SyncFileItemPtr &dirItem,
+        QueryMode queryLocal, QueryMode queryServer, qint64 lastSyncTimestamp,
+        ProcessDirectoryJob *parent);
+
+    explicit ProcessDirectoryJob(DiscoveryPhase *data, PinState basePinState, const PathTuple &path, const SyncFileItemPtr &dirItem, const SyncFileItemPtr &parentDirItem,
+                                 QueryMode queryLocal, qint64 lastSyncTimestamp, QObject *parent);
+
+    void start();
+    /** Start up to nbJobs, return the number of job started; emit finished() when done */
+    int processSubJobs(int nbJobs);
+
+    void setInsideEncryptedTree(bool isInsideEncryptedTree)
+    {
+        _isInsideEncryptedTree = isInsideEncryptedTree;
+    }
+
+    [[nodiscard]] bool isInsideEncryptedTree() const
+    {
+        return _isInsideEncryptedTree;
+    }
+
+    SyncFileItemPtr _dirItem;
+    SyncFileItemPtr _dirParentItem;
+
+private:
+    struct Entries
+    {
+        QString nameOverride;
+        SyncJournalFileRecord dbEntry;
+        RemoteInfo serverEntry;
+        LocalInfo localEntry;
+    };
 
     /** Iterate over entries inside the directory (non-recursively).
      *
@@ -162,8 +147,12 @@ private:
 
     // return true if the file is excluded.
     // path is the full relative path of the file. localName is the base name of the local entry.
-    bool handleExcluded(const QString &path, const QString &localName, bool isDirectory,
-        bool isHidden, bool isSymlink);
+    bool handleExcluded(const QString &path, const Entries &entries, const std::map<QString, Entries> &allEntries, bool isHidden);
+
+    bool canRemoveCaseClashConflictedCopy(const QString &path, const std::map<QString, Entries> &allEntries);
+
+    // check if the path is an e2e encrypted and the e2ee is not set up, and insert it into a corresponding list in the sync journal
+    void checkAndUpdateSelectiveSyncListsForE2eeFolders(const QString &path);
 
     /** Reconcile local/remote/db information for a single item.
      *
@@ -173,6 +162,12 @@ private:
      * This main function delegates some work to the processFile* functions.
      */
     void processFile(PathTuple, const LocalInfo &, const RemoteInfo &, const SyncJournalFileRecord &);
+
+    void postProcessServerNew(const SyncFileItemPtr &item,
+                              PathTuple &path,
+                              const LocalInfo &localEntry,
+                              const RemoteInfo &serverEntry,
+                              const SyncJournalFileRecord &dbEntry);
 
     /// processFile helper for when remote information is available, typically flows into AnalyzeLocalInfo when done
     void processFileAnalyzeRemoteInfo(const SyncFileItemPtr &item, PathTuple, const LocalInfo &, const RemoteInfo &, const SyncJournalFileRecord &);
@@ -192,6 +187,12 @@ private:
      * inside it.
      */
     bool checkPermissions(const SyncFileItemPtr &item);
+
+    [[nodiscard]] bool isAnyParentBeingRestored(const QString &file) const;
+
+    [[nodiscard]] bool isRename(const QString &originalPath) const;
+
+    [[nodiscard]] QStringList queryEditorsKeepingFileBusy(const SyncFileItemPtr &item, const PathTuple &path) const;
 
     struct MovePermissionResult
     {
@@ -216,11 +217,11 @@ private:
     void dbError();
 
     void addVirtualFileSuffix(QString &str) const;
-    bool hasVirtualFileSuffix(const QString &str) const;
+    [[nodiscard]] bool hasVirtualFileSuffix(const QString &str) const;
     void chopVirtualFileSuffix(QString &str) const;
 
     /** Convenience to detect suffix-vfs modes */
-    bool isVfsWithSuffix() const;
+    [[nodiscard]] bool isVfsWithSuffix() const;
 
     /** Start a remote discovery network job
      *

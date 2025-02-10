@@ -91,6 +91,11 @@ public:
         DeleteKeyValueStoreQuery,
         GetConflictRecordQuery,
         SetConflictRecordQuery,
+        GetCaseClashConflictRecordQuery,
+        GetCaseClashConflictRecordByPathQuery,
+        SetCaseClashConflictRecordQuery,
+        DeleteCaseClashConflictRecordQuery,
+        GetAllCaseClashConflictPathQuery,
         DeleteConflictRecordQuery,
         GetRawPinStateQuery,
         GetEffectivePinStateQuery,
@@ -98,6 +103,11 @@ public:
         CountDehydratedFilesQuery,
         SetPinStateQuery,
         WipePinStateQuery,
+        SetE2EeLockedFolderQuery,
+        GetE2EeLockedFolderQuery,
+        GetE2EeLockedFoldersQuery,
+        DeleteE2EeLockedFolderQuery,
+        ListAllTopLevelE2eeFoldersStatusLessThanQuery,
 
         PreparedQueryCount
     };

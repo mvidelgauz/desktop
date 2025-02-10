@@ -29,20 +29,25 @@ public:
     explicit VfsXAttr(QObject *parent = nullptr);
     ~VfsXAttr() override;
 
-    Mode mode() const override;
-    QString fileSuffix() const override;
+    [[nodiscard]] Mode mode() const override;
+    [[nodiscard]] QString fileSuffix() const override;
 
     void stop() override;
     void unregisterFolder() override;
 
-    bool socketApiPinStateActionsShown() const override;
-    bool isHydrating() const override;
+    [[nodiscard]] bool socketApiPinStateActionsShown() const override;
+    [[nodiscard]] bool isHydrating() const override;
 
     Result<void, QString> updateMetadata(const QString &filePath, time_t modtime, qint64 size, const QByteArray &fileId) override;
+    Result<Vfs::ConvertToPlaceholderResult, QString> updatePlaceholderMarkInSync(const QString &filePath, const QByteArray &fileId) override {Q_UNUSED(filePath) Q_UNUSED(fileId) return {QString{}};}
+    [[nodiscard]] bool isPlaceHolderInSync(const QString &filePath) const override { Q_UNUSED(filePath) return true; }
 
     Result<void, QString> createPlaceholder(const SyncFileItem &item) override;
     Result<void, QString> dehydratePlaceholder(const SyncFileItem &item) override;
-    Result<ConvertToPlaceholderResult, QString> convertToPlaceholder(const QString &filename, const SyncFileItem &item, const QString &replacesFile) override;
+    Result<ConvertToPlaceholderResult, QString> convertToPlaceholder(const QString &filename,
+                                                                     const SyncFileItem &item,
+                                                                     const QString &replacesFile,
+                                                                     UpdateMetadataTypes updateType) override;
 
     bool needsMetadataUpdate(const SyncFileItem &item) override;
     bool isDehydratedPlaceholder(const QString &filePath) override;
@@ -50,10 +55,10 @@ public:
 
     bool setPinState(const QString &folderPath, PinState state) override;
     Optional<PinState> pinState(const QString &folderPath) override;
-    AvailabilityResult availability(const QString &folderPath) override;
+    AvailabilityResult availability(const QString &folderPath, const AvailabilityRecursivity recursiveCheck) override;
 
 public slots:
-    void fileStatusChanged(const QString &systemFileName, SyncFileStatus fileStatus) override;
+    void fileStatusChanged(const QString &systemFileName, OCC::SyncFileStatus fileStatus) override;
 
 protected:
     void startImpl(const VfsSetupParams &params) override;

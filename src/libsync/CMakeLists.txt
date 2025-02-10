@@ -1,4 +1,5 @@
 project(libsync)
+find_package(KF6Archive REQUIRED)
 include(DefinePlatformDefaults)
 
 set(CMAKE_AUTOMOC TRUE)
@@ -11,57 +12,151 @@ if ( APPLE )
     )
 endif()
 
+if (WIN32)
+  list(APPEND OS_SPECIFIC_LINK_LIBRARIES
+    Crypt32
+  )
+endif()
+
 set(libsync_SRCS
+    account.h
     account.cpp
+    pushnotifications.h
     pushnotifications.cpp
+    wordlist.h
     wordlist.cpp
+    bandwidthmanager.h
     bandwidthmanager.cpp
+    capabilities.h
     capabilities.cpp
+    clientproxy.h
     clientproxy.cpp
+    clientstatusreporting.h
+    clientstatusreporting.cpp
+    clientstatusreportingcommon.h
+    clientstatusreportingcommon.cpp
+    clientstatusreportingdatabase.h
+    clientstatusreportingdatabase.cpp
+    clientstatusreportingnetwork.h
+    clientstatusreportingnetwork.cpp
+    clientstatusreportingrecord.h
+    cookiejar.h
     cookiejar.cpp
+    discovery.h
     discovery.cpp
+    discoveryphase.h
     discoveryphase.cpp
+    encryptfolderjob.h
     encryptfolderjob.cpp
+    encryptedfoldermetadatahandler.h
+    encryptedfoldermetadatahandler.cpp
+    filesystem.h
     filesystem.cpp
+    helpers.cpp
+    httplogger.h
     httplogger.cpp
+    logger.h
     logger.cpp
+    accessmanager.h
     accessmanager.cpp
+    configfile.h
     configfile.cpp
+    abstractnetworkjob.h
     abstractnetworkjob.cpp
+    networkjobs.h
     networkjobs.cpp
+    iconjob.h
+    iconjob.cpp
+    owncloudpropagator.h
     owncloudpropagator.cpp
+    nextcloudtheme.h
     nextcloudtheme.cpp
-    abstractpropagateremotedeleteencrypted.cpp
+    basepropagateremotedeleteencrypted.h
+    basepropagateremotedeleteencrypted.cpp
+    deletejob.h
     deletejob.cpp
+    progressdispatcher.h
     progressdispatcher.cpp
+    propagatorjobs.h
     propagatorjobs.cpp
+    propagatedownload.h
     propagatedownload.cpp
+    propagateupload.h
     propagateupload.cpp
     propagateuploadv1.cpp
     propagateuploadng.cpp
+    bulkpropagatorjob.h
+    bulkpropagatorjob.cpp
+    putmultifilejob.h
+    putmultifilejob.cpp
+    propagateremotedelete.h
     propagateremotedelete.cpp
+    propagateremotedeleteencrypted.h
     propagateremotedeleteencrypted.cpp
+    propagateremotedeleteencryptedrootfolder.h
     propagateremotedeleteencryptedrootfolder.cpp
+    propagateremotemove.h
     propagateremotemove.cpp
+    propagateremotemkdir.h
     propagateremotemkdir.cpp
+    propagateuploadencrypted.h
     propagateuploadencrypted.cpp
+    propagatedownloadencrypted.h
     propagatedownloadencrypted.cpp
+    syncengine.h
     syncengine.cpp
+    syncfileitem.h
     syncfileitem.cpp
+    syncfilestatustracker.h
     syncfilestatustracker.cpp
+    localdiscoverytracker.h
     localdiscoverytracker.cpp
+    syncresult.h
     syncresult.cpp
+    syncoptions.h
     syncoptions.cpp
+    theme.h
     theme.cpp
+    updatee2eefoldermetadatajob.h
+    updatee2eefoldermetadatajob.cpp
+    updatemigratede2eemetadatajob.h
+    updatemigratede2eemetadatajob.cpp
+    updatee2eefolderusersmetadatajob.h
+    updatee2eefolderusersmetadatajob.cpp
+    clientsideencryption.h
     clientsideencryption.cpp
+    clientsideencryptionjobs.h
     clientsideencryptionjobs.cpp
+    clientsideencryptionprimitives.h
+    clientsideencryptionprimitives.cpp
+    clientsideencryptiontokenselector.h
+    clientsideencryptiontokenselector.cpp
+    datetimeprovider.h
     datetimeprovider.cpp
+    rootencryptedfolderinfo.h
+    rootencryptedfolderinfo.cpp
+    foldermetadata.h
+    foldermetadata.cpp
+    ocsuserstatusconnector.h
     ocsuserstatusconnector.cpp
+    rootencryptedfolderinfo.cpp
+    rootencryptedfolderinfo.h
+    userstatusconnector.h
     userstatusconnector.cpp
+    ocsprofileconnector.h
+    ocsprofileconnector.cpp
+    lockfilejobs.h
+    lockfilejobs.cpp
+    creds/dummycredentials.h
     creds/dummycredentials.cpp
+    creds/abstractcredentials.h
     creds/abstractcredentials.cpp
+    creds/credentialscommon.h
     creds/credentialscommon.cpp
+    creds/keychainchunk.h
     creds/keychainchunk.cpp
+    caseclashconflictsolver.h
+    caseclashconflictsolver.cpp
 )
 
 if (WIN32)
@@ -70,9 +165,15 @@ if (WIN32)
 endif()
 
 if(TOKEN_AUTH_ONLY)
-    set (libsync_SRCS ${libsync_SRCS} creds/tokencredentials.cpp)
+    set (libsync_SRCS
+        ${libsync_SRCS}
+        creds/tokencredentials.h
+        creds/tokencredentials.cpp)
 else()
-    set (libsync_SRCS ${libsync_SRCS} creds/httpcredentials.cpp)
+    set (libsync_SRCS
+        ${libsync_SRCS}
+        creds/httpcredentials.h
+        creds/httpcredentials.cpp)
 endif()
 
 # These headers are installed for libowncloudsync to be used by 3rd party apps
@@ -102,7 +203,7 @@ IF (NOT APPLE)
     )
 ENDIF(NOT APPLE)
 
-find_package(Qt5 REQUIRED COMPONENTS WebSockets)
+find_package(Qt${QT_MAJOR_VERSION} REQUIRED COMPONENTS WebSockets Xml Sql Gui Svg Widgets)
 
 add_library(nextcloudsync SHARED ${libsync_SRCS})
 add_library(Nextcloud::sync ALIAS nextcloudsync)
@@ -112,15 +213,30 @@ target_link_libraries(nextcloudsync
   Nextcloud::csync
   OpenSSL::Crypto
   OpenSSL::SSL
+  PkgConfig::OPENSC-LIBP11
   ${OS_SPECIFIC_LINK_LIBRARIES}
-  Qt5::Core
-  Qt5::Network
-  Qt5::WebSockets
+  Qt::Core
+  Qt::Network
+  Qt::WebSockets
+  Qt::Xml
+  Qt::Sql
+  Qt::Gui
+  Qt::Svg
+  Qt::Widgets
+  KF6::Archive
+  Qt::Core5Compat
 )
 
+target_compile_features(nextcloudsync
+    PRIVATE
+        cxx_std_17
+)
+
+target_compile_definitions(nextcloudsync PRIVATE OPENSSL_SUPPRESS_DEPRECATED)
+
 if (NOT TOKEN_AUTH_ONLY)
-    find_package(Qt5 REQUIRED COMPONENTS Widgets Svg)
-    target_link_libraries(nextcloudsync PUBLIC Qt5::Widgets Qt5::Svg qt5keychain)
+    find_package(Qt${QT_MAJOR_VERSION} COMPONENTS REQUIRED Widgets Svg)
+    target_link_libraries(nextcloudsync PUBLIC Qt::Widgets Qt::Svg Qt${QT_MAJOR_VERSION}Keychain::Qt${QT_MAJOR_VERSION}Keychain)
 endif()
 
 if(Inotify_FOUND)
@@ -150,6 +266,8 @@ set_target_properties(
         ${APPLICATION_EXECUTABLE}sync
       RUNTIME_OUTPUT_NAME
         ${APPLICATION_EXECUTABLE}sync
+      ARCHIVE_OUTPUT_NAME
+        ${APPLICATION_EXECUTABLE}sync
 )
 
 if(NOT BUILD_OWNCLOUD_OSX_BUNDLE)
@@ -162,5 +280,8 @@ else()
     install(TARGETS nextcloudsync DESTINATION ${OWNCLOUD_OSX_BUNDLE}/Contents/MacOS)
 endif()
 
+if (WIN32)
+    install(FILES $<TARGET_PDB_FILE:nextcloudsync> DESTINATION bin OPTIONAL)
+endif()
 
 add_subdirectory(vfs)

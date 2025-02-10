@@ -38,8 +38,24 @@
 #include <QEvent>
 #include <QCheckBox>
 #include <QMessageBox>
+#include <QStandardPaths>
 
 #include <cstdlib>
+
+namespace
+{
+constexpr QColor darkWarnYellow(63, 63, 0);
+constexpr QColor lightWarnYellow(255, 255, 192);
+
+QPalette yellowWarnWidgetPalette(const QPalette &existingPalette)
+{
+    const auto warnYellow = OCC::Theme::instance()->darkMode() ? darkWarnYellow : lightWarnYellow;
+    auto modifiedPalette = existingPalette;
+    modifiedPalette.setColor(QPalette::Window, warnYellow);
+    modifiedPalette.setColor(QPalette::Base, warnYellow);
+    return modifiedPalette;
+}
+}
 
 namespace OCC {
 
@@ -71,12 +87,14 @@ FolderWizardLocalPath::FolderWizardLocalPath(const AccountPtr &account)
     QUrl serverUrl = _account->url();
     serverUrl.setUserName(_account->credentials()->user());
     QString defaultPath = QDir::homePath() + QLatin1Char('/') + Theme::instance()->appName();
-    defaultPath = FolderMan::instance()->findGoodPathForNewSyncFolder(defaultPath, serverUrl);
+    defaultPath = FolderMan::instance()->findGoodPathForNewSyncFolder(defaultPath, serverUrl, FolderMan::GoodPathStrategy::AllowOnlyNewPath);
     _ui.localFolderLineEdit->setText(QDir::toNativeSeparators(defaultPath));
     _ui.localFolderLineEdit->setToolTip(tr("Enter the path to the local folder."));
 
     _ui.warnLabel->setTextFormat(Qt::RichText);
     _ui.warnLabel->hide();
+
+    changeStyle();
 }
 
 FolderWizardLocalPath::~FolderWizardLocalPath() = default;
@@ -96,8 +114,8 @@ bool FolderWizardLocalPath::isComplete() const
     QUrl serverUrl = _account->url();
     serverUrl.setUserName(_account->credentials()->user());
 
-    QString errorStr = FolderMan::instance()->checkPathValidityForNewFolder(
-        QDir::fromNativeSeparators(_ui.localFolderLineEdit->text()), serverUrl);
+    const auto errorStr = FolderMan::instance()->checkPathValidityForNewFolder(
+        QDir::fromNativeSeparators(_ui.localFolderLineEdit->text()), serverUrl).second;
 
 
     bool isOk = errorStr.isEmpty();
@@ -141,12 +159,33 @@ void FolderWizardLocalPath::slotChooseLocalFolder()
     emit completeChanged();
 }
 
+
+void FolderWizardLocalPath::changeEvent(QEvent *e)
+{
+    switch (e->type()) {
+    case QEvent::StyleChange:
+    case QEvent::PaletteChange:
+    case QEvent::ThemeChange:
+        // Notify the other widgets (Dark-/Light-Mode switching)
+        changeStyle();
+        break;
+    default:
+        break;
+    }
+
+    FormatWarningsWizardPage::changeEvent(e);
+}
+
+void FolderWizardLocalPath::changeStyle()
+{
+    const auto yellowWarnPalette = yellowWarnWidgetPalette(_ui.warnLabel->palette());
+    _ui.warnLabel->setPalette(yellowWarnPalette);
+}
+
 // =================================================================================
 FolderWizardRemotePath::FolderWizardRemotePath(const AccountPtr &account)
     : FormatWarningsWizardPage()
-    , _warnWasVisible(false)
     , _account(account)
-
 {
     _ui.setupUi(this);
     _ui.warnFrame->hide();
@@ -167,6 +206,8 @@ FolderWizardRemotePath::FolderWizardRemotePath(const AccountPtr &account)
     _ui.folderTreeWidget->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     // Make sure that there will be a scrollbar when the contents is too wide
     _ui.folderTreeWidget->header()->setStretchLastSection(false);
+
+    changeStyle();
 }
 
 void FolderWizardRemotePath::slotAddRemoteFolder()
@@ -212,7 +253,7 @@ void FolderWizardRemotePath::slotCreateRemoteFolderFinished()
     qCDebug(lcWizard) << "webdav mkdir request finished";
     showWarn(tr("Folder was successfully created on %1.").arg(Theme::instance()->appNameGUI()));
     slotRefreshFolders();
-    _ui.folderEntry->setText(static_cast<MkColJob *>(sender())->path());
+    _ui.folderEntry->setText(dynamic_cast<MkColJob *>(sender())->path());
     slotLsColFolderEntry();
 }
 
@@ -424,11 +465,9 @@ void FolderWizardRemotePath::slotTypedPathFound(const QStringList &subpaths)
 
 LsColJob *FolderWizardRemotePath::runLsColJob(const QString &path)
 {
-    auto *job = new LsColJob(_account, path, this);
-    auto props = QList<QByteArray>() << "resourcetype";
-    if (_account->capabilities().clientSideEncryptionAvailable()) {
-        props << "http://nextcloud.org/ns:is-encrypted";
-    }
+    auto *job = new LsColJob(_account, path);
+    const auto props = QList<QByteArray>() << "resourcetype"
+                                           << "http://nextcloud.org/ns:is-encrypted";
     job->setProperties(props);
     connect(job, &LsColJob::directoryListingSubfolders,
         this, &FolderWizardRemotePath::slotUpdateDirectories);
@@ -498,6 +537,28 @@ void FolderWizardRemotePath::showWarn(const QString &msg) const
     }
 }
 
+void FolderWizardRemotePath::changeEvent(QEvent *e)
+{
+    switch (e->type()) {
+    case QEvent::StyleChange:
+    case QEvent::PaletteChange:
+    case QEvent::ThemeChange:
+        // Notify the other widgets (Dark-/Light-Mode switching)
+        changeStyle();
+        break;
+    default:
+        break;
+    }
+
+    FormatWarningsWizardPage::changeEvent(e);
+}
+
+void FolderWizardRemotePath::changeStyle()
+{
+    const auto yellowWarnPalette = yellowWarnWidgetPalette(_ui.warnLabel->palette());
+    _ui.warnLabel->setPalette(yellowWarnPalette);
+}
+
 // ====================================================================================
 
 FolderWizardSelectiveSync::FolderWizardSelectiveSync(const AccountPtr &account)
@@ -509,7 +570,7 @@ FolderWizardSelectiveSync::FolderWizardSelectiveSync(const AccountPtr &account)
     if (Theme::instance()->showVirtualFilesOption() && bestAvailableVfsMode() != Vfs::Off) {
         _virtualFilesCheckBox = new QCheckBox(tr("Use virtual files instead of downloading content immediately %1").arg(bestAvailableVfsMode() == Vfs::WindowsCfApi ? QString() : tr("(experimental)")));
         connect(_virtualFilesCheckBox, &QCheckBox::clicked, this, &FolderWizardSelectiveSync::virtualFilesCheckboxClicked);
-        connect(_virtualFilesCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
+        connect(_virtualFilesCheckBox, &QCheckBox::checkStateChanged, this, [this](int state) {
             _selectiveSync->setEnabled(state == Qt::Unchecked);
         });
         _virtualFilesCheckBox->setChecked(bestAvailableVfsMode() == Vfs::WindowsCfApi);
@@ -545,6 +606,11 @@ void FolderWizardSelectiveSync::initializePage()
             _virtualFilesCheckBox->setChecked(bestAvailableVfsMode() == Vfs::WindowsCfApi);
             _virtualFilesCheckBox->setEnabled(true);
             _virtualFilesCheckBox->setText(tr("Use virtual files instead of downloading content immediately %1").arg(bestAvailableVfsMode() == Vfs::WindowsCfApi ? QString() : tr("(experimental)")));
+
+            if (Theme::instance()->enforceVirtualFilesSyncFolder()) {
+                _virtualFilesCheckBox->setChecked(true);
+                _virtualFilesCheckBox->setDisabled(true);
+            }
         }
         //
     }
@@ -554,9 +620,10 @@ void FolderWizardSelectiveSync::initializePage()
 
 bool FolderWizardSelectiveSync::validatePage()
 {
-    const bool useVirtualFiles = _virtualFilesCheckBox && _virtualFilesCheckBox->isChecked();
+    const auto mode = bestAvailableVfsMode();
+    const bool useVirtualFiles = (mode == Vfs::WindowsCfApi) && (_virtualFilesCheckBox && _virtualFilesCheckBox->isChecked());
     if (useVirtualFiles) {
-        const auto availability = Vfs::checkAvailability(wizard()->field(QStringLiteral("sourceFolder")).toString());
+        const auto availability = Vfs::checkAvailability(wizard()->field(QStringLiteral("sourceFolder")).toString(), mode);
         if (!availability) {
             auto msg = new QMessageBox(QMessageBox::Warning, tr("Virtual files are not available for the selected folder"), availability.error(), QMessageBox::Ok, this);
             msg->setAttribute(Qt::WA_DeleteOnClose);
@@ -602,9 +669,9 @@ void FolderWizardSelectiveSync::virtualFilesCheckboxClicked()
 FolderWizard::FolderWizard(AccountPtr account, QWidget *parent)
     : QWizard(parent)
     , _folderWizardSourcePage(new FolderWizardLocalPath(account))
-    , _folderWizardTargetPage(nullptr)
     , _folderWizardSelectiveSyncPage(new FolderWizardSelectiveSync(account))
 {
+    setWizardStyle(QWizard::ModernStyle);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setPage(Page_Source, _folderWizardSourcePage);
     _folderWizardSourcePage->installEventFilter(this);

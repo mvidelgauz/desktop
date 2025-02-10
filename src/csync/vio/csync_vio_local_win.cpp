@@ -116,7 +116,7 @@ static time_t FileTimeToUnixTime(FILETIME *filetime, DWORD *remainder)
 std::unique_ptr<csync_file_stat_t> csync_vio_local_readdir(csync_vio_handle_t *handle, OCC::Vfs *vfs) {
 
   std::unique_ptr<csync_file_stat_t> file_stat;
-  DWORD rem;
+  DWORD rem = 0;
 
   errno = 0;
 
@@ -142,9 +142,11 @@ std::unique_ptr<csync_file_stat_t> csync_vio_local_readdir(csync_vio_handle_t *h
   file_stat = std::make_unique<csync_file_stat_t>();
   file_stat->path = path.toUtf8();
 
+    const auto isDirectory = handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+
     if (vfs && vfs->statTypeVirtualFile(file_stat.get(), &handle->ffd)) {
       // all good
-    } else if (handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    } else if ((handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !isDirectory) {
       // Detect symlinks, and treat junctions as symlinks too.
       if (handle->ffd.dwReserved0 == IO_REPARSE_TAG_SYMLINK
           || handle->ffd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT) {
@@ -155,15 +157,19 @@ std::unique_ptr<csync_file_stat_t> csync_vio_local_readdir(csync_vio_handle_t *h
           // but will also treat them normally for now.
           file_stat->type = ItemTypeFile;
       }
-    } else if (handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_DEVICE
-                || handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_OFFLINE
-              ) {
+    } else if ((handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_DEVICE || handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_OFFLINE) &&
+               !isDirectory) {
         file_stat->type = ItemTypeSkip;
-    } else if (handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-        file_stat->type = ItemTypeDirectory;
+    } else if (isDirectory) {
+        if (handle->ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT &&
+            (handle->ffd.dwReserved0 == IO_REPARSE_TAG_SYMLINK ||
+             handle->ffd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT)) {
+            file_stat->type = ItemTypeSoftLink;
+        } else {
+            file_stat->type = ItemTypeDirectory;
+        }
     } else {
-        // exclude ".lnk" files as they are not essential, but, causing troubles when enabling the VFS due to QFileInfo::isDir() and other methods are freezing, which causes the ".lnk" files to start hydrating and freezing the app eventually.
-        file_stat->type = !OCC::FileSystem::isLnkFile(path) ? ItemTypeFile : ItemTypeSoftLink;
+        file_stat->type = ItemTypeFile;
     }
 
     /* Check for the hidden flag */
@@ -191,14 +197,14 @@ int csync_vio_local_stat(const QString &uri, csync_file_stat_t *buf)
        Possible optimisation: only fetch the file id when we need it (for new files)
       */
 
-    HANDLE h;
+    HANDLE h = nullptr;
     BY_HANDLE_FILE_INFORMATION fileInfo;
     ULARGE_INTEGER FileIndex;
 
     h = CreateFileW(reinterpret_cast<const wchar_t *>(OCC::FileSystem::longWinPath(uri).utf16()), 0, FILE_SHARE_WRITE | FILE_SHARE_READ | FILE_SHARE_DELETE,
-        NULL, OPEN_EXISTING,
+        nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        NULL);
+        nullptr);
     if( h == INVALID_HANDLE_VALUE ) {
         errno = GetLastError();
         qCCritical(lcCSyncVIOLocal) << "CreateFileW failed on" << uri << OCC::Utility::formatWinError(errno);
@@ -220,7 +226,7 @@ int csync_vio_local_stat(const QString &uri, csync_file_stat_t *buf)
     buf->inode = FileIndex.QuadPart;
     buf->size = (fileInfo.nFileSizeHigh * ((int64_t)(MAXDWORD)+1)) + fileInfo.nFileSizeLow;
 
-    DWORD rem;
+    DWORD rem = 0;
     buf->modtime = FileTimeToUnixTime(&fileInfo.ftLastWriteTime, &rem);
 
     CloseHandle(h);

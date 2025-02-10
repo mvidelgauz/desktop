@@ -13,11 +13,12 @@
  */
 
 #include "syncstatussummary.h"
+#include "accountfwd.h"
 #include "folderman.h"
 #include "navigationpanehelper.h"
 #include "networkjobs.h"
 #include "syncresult.h"
-#include "tray/UserModel.h"
+#include "tray/usermodel.h"
 
 #include <theme.h>
 
@@ -51,41 +52,24 @@ SyncStatusSummary::SyncStatusSummary(QObject *parent)
     connect(folderMan, &FolderMan::folderSyncStateChange, this, &SyncStatusSummary::onFolderSyncStateChanged);
 }
 
+bool SyncStatusSummary::reloadNeeded(AccountState *accountState) const
+{
+    if (_accountState.data() == accountState) {
+        return false;
+    }
+    return true;
+}
+
 void SyncStatusSummary::load()
 {
     const auto currentUser = UserModel::instance()->currentUser();
     if (!currentUser) {
         return;
     }
-    auto accountState = currentUser->accountState();
-
-    if (_accountState.data() == accountState.data()) {
-        return;
-    }
-
-    _accountState = accountState;
+    setAccountState(currentUser->accountState());
     clearFolderErrors();
     connectToFoldersProgress(FolderMan::instance()->map());
-    auto syncStateFallbackNeeded = true;
-    for (const auto &folder : FolderMan::instance()->map()) {
-        if (_accountState.data() != folder->accountState()) {
-            continue;
-        }
-        onFolderSyncStateChanged(folder);
-        syncStateFallbackNeeded = false;
-    }
-
-    if (syncStateFallbackNeeded) {
-        setSyncing(false);
-        setSyncStatusDetailString("");
-        if (_accountState && !_accountState->isConnected()) {
-            setSyncStatusString(tr("Offline"));
-            setSyncIcon(Theme::instance()->folderOffline());
-        } else {
-            setSyncStatusString(tr("All synced!"));
-            setSyncIcon(Theme::instance()->syncStatusOk());
-        }
-    }
+    initSyncState();
 }
 
 double SyncStatusSummary::syncProgress() const
@@ -137,6 +121,7 @@ void SyncStatusSummary::setSyncStateForFolder(const Folder *folder)
 {
     if (_accountState && !_accountState->isConnected()) {
         setSyncing(false);
+        setTotalFiles(0);
         setSyncStatusString(tr("Offline"));
         setSyncStatusDetailString("");
         setSyncIcon(Theme::instance()->folderOffline());
@@ -151,6 +136,7 @@ void SyncStatusSummary::setSyncStateForFolder(const Folder *folder)
         // Success should only be shown if all folders were fine
         if (!folderErrors() || folderError(folder)) {
             setSyncing(false);
+            setTotalFiles(0);
             setSyncStatusString(tr("All synced!"));
             setSyncStatusDetailString("");
             setSyncIcon(Theme::instance()->syncStatusOk());
@@ -160,6 +146,7 @@ void SyncStatusSummary::setSyncStateForFolder(const Folder *folder)
     case SyncResult::Error:
     case SyncResult::SetupError:
         setSyncing(false);
+        setTotalFiles(0);
         setSyncStatusString(tr("Some files couldn't be synced!"));
         setSyncStatusDetailString(tr("See below for errors"));
         setSyncIcon(Theme::instance()->syncStatusError());
@@ -168,13 +155,18 @@ void SyncStatusSummary::setSyncStateForFolder(const Folder *folder)
     case SyncResult::SyncRunning:
     case SyncResult::NotYetStarted:
         setSyncing(true);
-        setSyncStatusString(tr("Syncing"));
+        if (totalFiles() <= 0) {
+            setSyncStatusString(tr("Checking folder changes"));
+        } else {
+            setSyncStatusString(tr("Syncing changes"));
+        }
         setSyncStatusDetailString("");
         setSyncIcon(Theme::instance()->syncStatusRunning());
         break;
     case SyncResult::Paused:
     case SyncResult::SyncAbortRequested:
         setSyncing(false);
+        setTotalFiles(0);
         setSyncStatusString(tr("Sync paused"));
         setSyncStatusDetailString("");
         setSyncIcon(Theme::instance()->syncStatusPause());
@@ -182,7 +174,8 @@ void SyncStatusSummary::setSyncStateForFolder(const Folder *folder)
     case SyncResult::Problem:
     case SyncResult::Undefined:
         setSyncing(false);
-        setSyncStatusString(tr("Some files had problems during the sync!"));
+        setTotalFiles(0);
+        setSyncStatusString(tr("Some files could not be synced!"));
         setSyncStatusDetailString(tr("See below for warnings"));
         setSyncIcon(Theme::instance()->syncStatusWarning());
         markFolderAsError(folder);
@@ -221,9 +214,15 @@ void SyncStatusSummary::onFolderProgressInfo(const ProgressInfo &progress)
     const qint64 currentFile = progress.currentFile();
     const qint64 completedFile = progress.completedFiles();
     const qint64 totalSize = qMax(completedSize, progress.totalSize());
-    const qint64 totalFileCount = qMax(currentFile, progress.totalFiles());
+    const qint64 numFilesInProgress = qMax(currentFile, progress.totalFiles());
 
-    setSyncProgress(calculateOverallPercent(totalFileCount, completedFile, totalSize, completedSize));
+    if (_totalFiles <= 0 && numFilesInProgress > 0) {
+        setSyncStatusString(tr("Syncing"));
+    }
+
+    setTotalFiles(numFilesInProgress);
+
+    setSyncProgress(calculateOverallPercent(numFilesInProgress, completedFile, totalSize, completedSize));
 
     if (totalSize > 0) {
         const auto completedSizeString = Utility::octetsToString(completedSize);
@@ -239,8 +238,8 @@ void SyncStatusSummary::onFolderProgressInfo(const ProgressInfo &progress)
         }
     }
 
-    if (totalFileCount > 0) {
-        setSyncStatusString(tr("Syncing file %1 of %2").arg(currentFile).arg(totalFileCount));
+    if (numFilesInProgress > 0) {
+        setSyncStatusString(tr("Syncing file %1 of %2").arg(currentFile).arg(numFilesInProgress));
     }
 }
 
@@ -252,6 +251,14 @@ void SyncStatusSummary::setSyncing(bool value)
 
     _isSyncing = value;
     emit syncingChanged();
+}
+
+void SyncStatusSummary::setTotalFiles(const qint64 value)
+{
+    if (value != _totalFiles) {
+        _totalFiles = value;
+        emit totalFilesChanged();
+    }
 }
 
 void SyncStatusSummary::setSyncProgress(double value)
@@ -284,6 +291,11 @@ QString SyncStatusSummary::syncStatusDetailString() const
     return _syncStatusDetailString;
 }
 
+qint64 SyncStatusSummary::totalFiles() const
+{
+    return _totalFiles;
+}
+
 void SyncStatusSummary::setSyncIcon(const QUrl &value)
 {
     if (_syncIcon == value) {
@@ -313,6 +325,51 @@ void SyncStatusSummary::connectToFoldersProgress(const Folder::Map &folderMap)
         } else {
             disconnect(folder, &Folder::progressInfo, this, &SyncStatusSummary::onFolderProgressInfo);
         }
+    }
+}
+
+void SyncStatusSummary::onIsConnectedChanged()
+{
+    setSyncStateToConnectedState();
+}
+
+void SyncStatusSummary::setSyncStateToConnectedState()
+{
+    setSyncing(false);
+    setTotalFiles(0);
+    setSyncStatusDetailString("");
+    if (_accountState && !_accountState->isConnected()) {
+        setSyncStatusString(tr("Offline"));
+        setSyncIcon(Theme::instance()->folderOffline());
+    } else {
+        setSyncStatusString(tr("All synced!"));
+        setSyncIcon(Theme::instance()->syncStatusOk());
+    }
+}
+
+void SyncStatusSummary::setAccountState(AccountStatePtr accountState)
+{
+    if (!reloadNeeded(accountState.data())) {
+        return;
+    }
+    if (_accountState) {
+        disconnect(
+            _accountState.data(), &AccountState::isConnectedChanged, this, &SyncStatusSummary::onIsConnectedChanged);
+    }
+    _accountState = accountState;
+    connect(_accountState.data(), &AccountState::isConnectedChanged, this, &SyncStatusSummary::onIsConnectedChanged);
+}
+
+void SyncStatusSummary::initSyncState()
+{
+    auto syncStateFallbackNeeded = true;
+    for (const auto &folder : FolderMan::instance()->map()) {
+        onFolderSyncStateChanged(folder);
+        syncStateFallbackNeeded = false;
+    }
+
+    if (syncStateFallbackNeeded) {
+        setSyncStateToConnectedState();
     }
 }
 }

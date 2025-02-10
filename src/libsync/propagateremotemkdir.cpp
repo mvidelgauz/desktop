@@ -20,6 +20,8 @@
 #include "deletejob.h"
 #include "common/asserts.h"
 #include "encryptfolderjob.h"
+#include "filesystem.h"
+#include "csync/csync.h"
 
 #include <QFile>
 #include <QLoggingCategory>
@@ -30,8 +32,6 @@ Q_LOGGING_CATEGORY(lcPropagateRemoteMkdir, "nextcloud.sync.propagator.remotemkdi
 
 PropagateRemoteMkdir::PropagateRemoteMkdir(OwncloudPropagator *propagator, const SyncFileItemPtr &item)
     : PropagateItemJob(propagator, item)
-    , _deleteExisting(false)
-    , _uploadEncryptedHelper(nullptr)
 {
     const auto path = _item->_file;
     const auto slashPosition = path.lastIndexOf('/');
@@ -124,7 +124,7 @@ void PropagateRemoteMkdir::finalizeMkColJob(QNetworkReply::NetworkError err, con
     } else if (err != QNetworkReply::NoError) {
         SyncFileItem::Status status = classifyError(err, _item->_httpErrorCode,
             &propagator()->_anotherSyncNeeded);
-        done(status, _item->_errorString);
+        done(status, _item->_errorString, errorCategoryFromNetworkError(err));
         return;
     } else if (_item->_httpErrorCode != 201) {
         // Normally we expect "201 Created"
@@ -133,18 +133,24 @@ void PropagateRemoteMkdir::finalizeMkColJob(QNetworkReply::NetworkError err, con
         done(SyncFileItem::NormalError,
             tr("Wrong HTTP code returned by server. Expected 201, but received \"%1 %2\".")
                 .arg(_item->_httpErrorCode)
-                .arg(jobHttpReasonPhraseString));
+                .arg(jobHttpReasonPhraseString), ErrorCategory::GenericError);
         return;
     }
 
     propagator()->_activeJobList.append(this);
-    auto propfindJob = new PropfindJob(_job->account(), _job->path(), this);
-    propfindJob->setProperties({ "oc:permissions" });
+    auto propfindJob = new PropfindJob(propagator()->account(), jobPath, this);
+    propfindJob->setProperties({QByteArrayLiteral("http://owncloud.org/ns:share-types"), QByteArrayLiteral("http://owncloud.org/ns:permissions"), QByteArrayLiteral("http://nextcloud.org/ns:is-mount-root")});
     connect(propfindJob, &PropfindJob::result, this, [this, jobPath](const QVariantMap &result){
         propagator()->_activeJobList.removeOne(this);
-        _item->_remotePerm = RemotePermissions::fromServerString(result.value(QStringLiteral("permissions")).toString());
+        _item->_remotePerm = RemotePermissions::fromServerString(result.value(QStringLiteral("permissions")).toString(),
+                                                                 propagator()->account()->serverHasMountRootProperty() ? RemotePermissions::MountedPermissionAlgorithm::UseMountRootProperty : RemotePermissions::MountedPermissionAlgorithm::WildGuessMountedSubProperty,
+                                                                 result);
 
-        if (!_uploadEncryptedHelper && !_item->_isEncrypted) {
+        _item->_sharedByMe = !result.value(QStringLiteral("share-types")).toString().isEmpty();
+        _item->_isShared = _item->_remotePerm.hasPermission(RemotePermissions::IsShared) || _item->_sharedByMe;
+        _item->_lastShareStateFetchedTimestamp = QDateTime::currentMSecsSinceEpoch();
+
+        if (!_uploadEncryptedHelper && !_item->isEncrypted()) {
             success();
         } else {
             // We still need to mark that folder encrypted in case we were uploading it as encrypted one
@@ -154,21 +160,41 @@ void PropagateRemoteMkdir::finalizeMkColJob(QNetworkReply::NetworkError err, con
             // We're expecting directory path in /Foo/Bar convention...
             Q_ASSERT(jobPath.startsWith('/') && !jobPath.endsWith('/'));
             // But encryption job expect it in Foo/Bar/ convention
-            auto job = new OCC::EncryptFolderJob(propagator()->account(), propagator()->_journal, jobPath.mid(1), _item->_fileId, this);
+            auto job = new OCC::EncryptFolderJob(propagator()->account(),
+                                                 propagator()->_journal,
+                                                 jobPath.mid(1),
+                                                 _item->_file,
+                                                 propagator()->remotePath(),
+                                                 _item->_fileId,
+                                                 propagator(),
+                                                 _item);
+            job->setParent(this);
             connect(job, &OCC::EncryptFolderJob::finished, this, &PropagateRemoteMkdir::slotEncryptFolderFinished);
             job->start();
         }
     });
-    connect(propfindJob, &PropfindJob::finishedWithError, this, [this]{
-        // ignore the PROPFIND error
+    connect(propfindJob, &PropfindJob::finishedWithError, this, [this] (QNetworkReply *reply) {
+        const auto err = reply ? reply->error() : QNetworkReply::NetworkError::UnknownNetworkError;
         propagator()->_activeJobList.removeOne(this);
-        done(SyncFileItem::NormalError);
+        done(SyncFileItem::NormalError, {}, errorCategoryFromNetworkError(err));
     });
     propfindJob->start();
 }
 
 void PropagateRemoteMkdir::slotMkdir()
 {
+    if (!_item->_originalFile.isEmpty() && !_item->_renameTarget.isEmpty() && _item->_renameTarget != _item->_originalFile) {
+        const auto existingFile = propagator()->fullLocalPath(propagator()->adjustRenamedPath(_item->_originalFile));
+        const auto targetFile = propagator()->fullLocalPath(_item->_renameTarget);
+        QString renameError;
+        if (!FileSystem::rename(existingFile, targetFile, &renameError)) {
+            done(SyncFileItem::NormalError, renameError, ErrorCategory::GenericError);
+            return;
+        }
+        emit propagator()->touchedFile(existingFile);
+        emit propagator()->touchedFile(targetFile);
+    }
+
     const auto path = _item->_file;
     const auto slashPosition = path.lastIndexOf('/');
     const auto parentPath = slashPosition >= 0 ? path.left(slashPosition) : QString();
@@ -176,7 +202,7 @@ void PropagateRemoteMkdir::slotMkdir()
     SyncJournalFileRecord parentRec;
     bool ok = propagator()->_journal->getFileRecord(parentPath, &parentRec);
     if (!ok) {
-        done(SyncFileItem::NormalError);
+        done(SyncFileItem::NormalError, {}, ErrorCategory::GenericError);
         return;
     }
 
@@ -208,6 +234,7 @@ void PropagateRemoteMkdir::slotMkcolJobFinished()
 
     _item->_fileId = _job->reply()->rawHeader("OC-FileId");
 
+    qCInfo(lcPropagateRemoteMkdir()) << "mkcol job error string:" << _item->_errorString << _job->errorString();
     _item->_errorString = _job->errorString();
 
     const auto jobHttpReasonPhraseString = _job->reply()->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString();
@@ -225,11 +252,20 @@ void PropagateRemoteMkdir::slotMkcolJobFinished()
     }
 }
 
-void PropagateRemoteMkdir::slotEncryptFolderFinished()
+void PropagateRemoteMkdir::slotEncryptFolderFinished(int status, EncryptionStatusEnums::ItemEncryptionStatus encryptionStatus)
 {
+    if (status != EncryptFolderJob::Success) {
+        done(SyncFileItem::FatalError, tr("Failed to encrypt a folder %1").arg(_item->_file), ErrorCategory::GenericError);
+        return;
+    }
     qCDebug(lcPropagateRemoteMkdir) << "Success making the new folder encrypted";
     propagator()->_activeJobList.removeOne(this);
-    _item->_isEncrypted = true;
+    _item->_e2eEncryptionStatus = encryptionStatus;
+    _item->_e2eCertificateFingerprint = propagator()->account()->encryptionCertificateFingerprint();
+    _item->_e2eEncryptionStatusRemote = encryptionStatus;
+    if (_item->isEncrypted()) {
+        _item->_e2eEncryptionServerCapability = EncryptionStatusEnums::fromEndToEndEncryptionApiVersion(propagator()->account()->capabilities().clientSideEncryptionVersion());
+    }
     success();
 }
 
@@ -243,13 +279,13 @@ void PropagateRemoteMkdir::success()
     // save the file id already so we can detect rename or remove
     const auto result = propagator()->updateMetadata(itemCopy);
     if (!result) {
-        done(SyncFileItem::FatalError, tr("Error writing metadata to the database: %1").arg(result.error()));
+        done(SyncFileItem::FatalError, tr("Error writing metadata to the database: %1").arg(result.error()), ErrorCategory::GenericError);
         return;
     } else if (*result == Vfs::ConvertToPlaceholderResult::Locked) {
-        done(SyncFileItem::FatalError, tr("The file %1 is currently in use").arg(_item->_file));
+        done(SyncFileItem::FatalError, tr("The file %1 is currently in use").arg(_item->_file), ErrorCategory::GenericError);
         return;
     }
 
-    done(SyncFileItem::Success);
+    done(SyncFileItem::Success, {}, ErrorCategory::NoError);
 }
 }

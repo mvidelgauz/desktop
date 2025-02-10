@@ -43,11 +43,15 @@ enum CSYNC_EXCLUDE_TYPE {
   CSYNC_FILE_EXCLUDE_HIDDEN,
   CSYNC_FILE_EXCLUDE_STAT_FAILED,
   CSYNC_FILE_EXCLUDE_CONFLICT,
+  CSYNC_FILE_EXCLUDE_CASE_CLASH_CONFLICT,
   CSYNC_FILE_EXCLUDE_CANNOT_ENCODE,
   CSYNC_FILE_EXCLUDE_SERVER_BLACKLISTED,
+  CSYNC_FILE_EXCLUDE_LEADING_SPACE,
+  CSYNC_FILE_EXCLUDE_LEADING_AND_TRAILING_SPACE,
 };
 
 class ExcludedFilesTest;
+class QFile;
 
 /**
  * Manages file/directory exclusion.
@@ -77,7 +81,6 @@ public:
      * Does not load the file. Use reloadExcludeFiles() afterwards.
      */
     void addExcludeFilePath(const QString &path);
-    void addInTreeExcludeFilePath(const QString &path);
 
     /**
      * Whether conflict files shall be excluded.
@@ -92,7 +95,7 @@ public:
      * @param filePath     the absolute path to the file
      * @param basePath     folder path from which to apply exclude rules, ends with a /
      */
-    bool isExcluded(
+    [[nodiscard]] bool isExcluded(
         const QString &filePath,
         const QString &basePath,
         bool excludeHidden) const;
@@ -148,7 +151,7 @@ public slots:
     /**
      * Loads the exclude patterns from file the registered base paths.
      */
-    bool loadExcludeFile(const QString &basePath, const QString &file);
+    void loadExcludeFilePatterns(const QString &basePath, QFile &file);
 
 private:
     /**
@@ -166,7 +169,7 @@ private:
      *
      * Would enable the "myexclude" pattern only for versions before 2.5.0.
      */
-    bool versionDirectiveKeepNextLine(const QByteArray &directive) const;
+    [[nodiscard]] bool versionDirectiveKeepNextLine(const QByteArray &directive) const;
 
     /**
      * @brief Match the exclude pattern against the full path.
@@ -176,7 +179,7 @@ private:
      * Note that this only matches patterns. It does not check whether the file
      * or directory pointed to is hidden (or whether it even exists).
      */
-    CSYNC_EXCLUDE_TYPE fullPatternMatch(const QString &path, ItemType filetype) const;
+    [[nodiscard]] CSYNC_EXCLUDE_TYPE fullPatternMatch(const QString &path, ItemType filetype) const;
 
     // Our BasePath need to end with '/'
     class BasePathString : public QString
