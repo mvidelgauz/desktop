@@ -29,25 +29,26 @@ Q_LOGGING_CATEGORY(lcPropagateRemoteDelete, "nextcloud.sync.propagator.remotedel
 void PropagateRemoteDelete::start()
 {
     qCInfo(lcPropagateRemoteDelete) << "Start propagate remote delete job for" << _item->_file;
+    qCInfo(lcPermanentLog) << "delete" << _item->_file << _item->_discoveryResult;
 
     if (propagator()->_abortRequested)
         return;
 
-    if (!_item->_encryptedFileName.isEmpty() || _item->_isEncrypted) {
+    if (!_item->_encryptedFileName.isEmpty() || _item->isEncrypted()) {
         if (!_item->_encryptedFileName.isEmpty()) {
             _deleteEncryptedHelper = new PropagateRemoteDeleteEncrypted(propagator(), _item, this);
         } else {
             _deleteEncryptedHelper = new PropagateRemoteDeleteEncryptedRootFolder(propagator(), _item, this);
         }
-        connect(_deleteEncryptedHelper, &AbstractPropagateRemoteDeleteEncrypted::finished, this, [this] (bool success) {
+        connect(_deleteEncryptedHelper, &BasePropagateRemoteDeleteEncrypted::finished, this, [this] (bool success) {
             if (!success) {
                 SyncFileItem::Status status = SyncFileItem::NormalError;
                 if (_deleteEncryptedHelper->networkError() != QNetworkReply::NoError && _deleteEncryptedHelper->networkError() != QNetworkReply::ContentNotFoundError) {
                     status = classifyError(_deleteEncryptedHelper->networkError(), _item->_httpErrorCode, &propagator()->_anotherSyncNeeded);
                 }
-                done(status, _deleteEncryptedHelper->errorString());
+                done(status, _deleteEncryptedHelper->errorString(), ErrorCategory::GenericError);
             } else {
-                done(SyncFileItem::Success);
+                done(SyncFileItem::Success, {}, ErrorCategory::NoError);
             }
         });
         _deleteEncryptedHelper->start();
@@ -58,12 +59,19 @@ void PropagateRemoteDelete::start()
 
 void PropagateRemoteDelete::createDeleteJob(const QString &filename)
 {
-    qCInfo(lcPropagateRemoteDelete) << "Deleting file, local" << _item->_file << "remote" << filename;
+    Q_ASSERT(propagator());
+    auto remoteFilename = filename;
+    if (_item->_type == ItemType::ItemTypeVirtualFile) {
+        if (const auto vfs = propagator()->syncOptions()._vfs; vfs->mode() == Vfs::Mode::WithSuffix) {
+            // These are compile-time constants so no need to recreate each time
+            static constexpr auto suffixSize = std::string_view(APPLICATION_DOTVIRTUALFILE_SUFFIX).size();
+            remoteFilename.chop(suffixSize);
+        }
+    }
 
-    _job = new DeleteJob(propagator()->account(),
-        propagator()->fullRemotePath(filename),
-        this);
+    qCInfo(lcPropagateRemoteDelete) << "Deleting file, local" << _item->_file << "remote" << remoteFilename;
 
+    _job = new DeleteJob(propagator()->account(), propagator()->fullRemotePath(remoteFilename), this);
     connect(_job.data(), &DeleteJob::finishedSignal, this, &PropagateRemoteDelete::slotDeleteJobFinished);
     propagator()->_activeJobList.append(this);
     _job->start();
@@ -94,7 +102,8 @@ void PropagateRemoteDelete::slotDeleteJobFinished()
     if (err != QNetworkReply::NoError && err != QNetworkReply::ContentNotFoundError) {
         SyncFileItem::Status status = classifyError(err, _item->_httpErrorCode,
             &propagator()->_anotherSyncNeeded);
-        done(status, _job->errorString());
+
+        done(status, _job->errorString(), errorCategoryFromNetworkError(err));
         return;
     }
 
@@ -109,13 +118,18 @@ void PropagateRemoteDelete::slotDeleteJobFinished()
         done(SyncFileItem::NormalError,
             tr("Wrong HTTP code returned by server. Expected 204, but received \"%1 %2\".")
                 .arg(_item->_httpErrorCode)
-                .arg(_job->reply()->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString()));
+                .arg(_job->reply()->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString()), ErrorCategory::GenericError);
         return;
     }
 
-    propagator()->_journal->deleteFileRecord(_item->_originalFile, _item->isDirectory());
+    if (!propagator()->_journal->deleteFileRecord(_item->_originalFile, _item->isDirectory())) {
+        qCWarning(lcPropagateRemoteDelete) << "could not delete file from local DB" << _item->_originalFile;
+        done(SyncFileItem::NormalError, tr("Could not delete file record %1 from local DB").arg(_item->_originalFile), ErrorCategory::GenericError);
+        return;
+    }
+
     propagator()->_journal->commit("Remote Remove");
 
-    done(SyncFileItem::Success);
+    done(SyncFileItem::Success, {}, ErrorCategory::NoError);
 }
 }

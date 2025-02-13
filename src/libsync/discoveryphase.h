@@ -32,15 +32,26 @@ class ExcludedFiles;
 
 namespace OCC {
 
+namespace LocalDiscoveryEnums {
+
+OCSYNC_EXPORT Q_NAMESPACE
+
 enum class LocalDiscoveryStyle {
     FilesystemOnly, //< read all local data from the filesystem
     DatabaseAndFilesystem, //< read from the db, except for listed paths
 };
 
+Q_ENUM_NS(LocalDiscoveryStyle)
+
+}
+
+using OCC::LocalDiscoveryEnums::LocalDiscoveryStyle;
 
 class Account;
 class SyncJournalDb;
 class ProcessDirectoryJob;
+
+enum class ErrorCategory;
 
 /**
  * Represent all the meta-data about a file in the server
@@ -57,20 +68,36 @@ struct RemoteInfo
     int64_t size = 0;
     int64_t sizeOfFolder = 0;
     bool isDirectory = false;
-    bool isE2eEncrypted = false;
+    bool _isE2eEncrypted = false;
+    bool isFileDropDetected = false;
     QString e2eMangledName;
+    QByteArray e2eCertificateFingerprint;
+    bool sharedByMe = false;
 
-    bool isValid() const { return !name.isNull(); }
+    [[nodiscard]] bool isValid() const { return !name.isNull(); }
+    [[nodiscard]] bool isE2eEncrypted() const { return _isE2eEncrypted; }
 
     QString directDownloadUrl;
     QString directDownloadCookies;
+
+    SyncFileItem::LockStatus locked = SyncFileItem::LockStatus::UnlockedItem;
+    QString lockOwnerDisplayName;
+    QString lockOwnerId;
+    SyncFileItem::LockOwnerType lockOwnerType = SyncFileItem::LockOwnerType::UserLock;
+    QString lockEditorApp;
+    qint64 lockTime = 0;
+    qint64 lockTimeout = 0;
+    QString lockToken;
+
+    bool isLivePhoto = false;
+    QString livePhotoFile;
 };
 
 struct LocalInfo
 {
     /** FileName of the entry (this does not contains any directory or path, just the plain name */
     QString name;
-    QString renameName;
+    QString caseClashConflictingName;
     time_t modtime = 0;
     int64_t size = 0;
     uint64_t inode = 0;
@@ -79,7 +106,9 @@ struct LocalInfo
     bool isHidden = false;
     bool isVirtualFile = false;
     bool isSymLink = false;
-    bool isValid() const { return !name.isNull(); }
+    bool isMetadataMissing = false;
+    bool isPermissionsInvalid = false;
+    [[nodiscard]] bool isValid() const { return !name.isNull(); }
 };
 
 /**
@@ -95,11 +124,11 @@ public:
 
     void run() override;
 signals:
-    void finished(QVector<LocalInfo> result);
+    void finished(QVector<OCC::LocalInfo> result);
     void finishedFatalError(QString errorString);
     void finishedNonFatalError(QString errorString);
 
-    void itemDiscovered(SyncFileItemPtr item);
+    void itemDiscovered(OCC::SyncFileItemPtr item);
     void childIgnored(bool b);
 private slots:
 private:
@@ -109,6 +138,7 @@ private:
 public:
 };
 
+class FolderMetadata;
 
 /**
  * @brief Run a PROPFIND on a directory and process the results for Discovery
@@ -119,17 +149,29 @@ class DiscoverySingleDirectoryJob : public QObject
 {
     Q_OBJECT
 public:
-    explicit DiscoverySingleDirectoryJob(const AccountPtr &account, const QString &path, QObject *parent = nullptr);
+    explicit DiscoverySingleDirectoryJob(const AccountPtr &account,
+                                         const QString &path,
+                                         const QString &remoteRootFolderPath,
+        /* TODO for topLevelE2eeFolderPaths, from review: I still do not get why giving the whole QSet instead of just the parent of the folder we are in
+        sounds to me like it would be much more efficient to just have the e2ee parent folder that we are
+        inside*/
+                                         const QSet<QString> &topLevelE2eeFolderPaths,
+                                         QObject *parent = nullptr);
     // Specify that this is the root and we need to check the data-fingerprint
     void setIsRootPath() { _isRootPath = true; }
     void start();
     void abort();
+    [[nodiscard]] bool isFileDropDetected() const;
+    [[nodiscard]] bool encryptedMetadataNeedUpdate() const;
+    [[nodiscard]] QByteArray certificateSha256Fingerprint() const;
+    [[nodiscard]] SyncFileItem::EncryptionStatus currentEncryptionStatus() const;
+    [[nodiscard]] SyncFileItem::EncryptionStatus requiredEncryptionStatus() const;
 
     // This is not actually a network job, it is just a job
 signals:
-    void firstDirectoryPermissions(RemotePermissions);
+    void firstDirectoryPermissions(OCC::RemotePermissions);
     void etag(const QByteArray &, const QDateTime &time);
-    void finished(const HttpResult<QVector<RemoteInfo>> &result);
+    void finished(const OCC::HttpResult<QVector<OCC::RemoteInfo>> &result);
 
 private slots:
     void directoryListingIteratedSlot(const QString &, const QMap<QString, QString> &);
@@ -140,24 +182,37 @@ private slots:
     void metadataError(const QByteArray& fileId, int httpReturnCode);
 
 private:
+
+    [[nodiscard]] bool isE2eEncrypted() const { return _encryptionStatusCurrent != SyncFileItem::EncryptionStatus::NotEncrypted; }
+
     QVector<RemoteInfo> _results;
     QString _subPath;
+    QString _remoteRootFolderPath;
     QByteArray _firstEtag;
     QByteArray _fileId;
+    QByteArray _localFileId;
     AccountPtr _account;
     // The first result is for the directory itself and need to be ignored.
     // This flag is true if it was already ignored.
-    bool _ignoredFirst;
+    bool _ignoredFirst = false;
     // Set to true if this is the root path and we need to check the data-fingerprint
-    bool _isRootPath;
+    bool _isRootPath = false;
     // If this directory is an external storage (The first item has 'M' in its permission)
-    bool _isExternalStorage;
+    bool _isExternalStorage = false;
     // If this directory is e2ee
-    bool _isE2eEncrypted;
+    SyncFileItem::EncryptionStatus _encryptionStatusCurrent = SyncFileItem::EncryptionStatus::NotEncrypted;
+    bool _isFileDropDetected = false;
+    bool _encryptedMetadataNeedUpdate = false;
+    SyncFileItem::EncryptionStatus _encryptionStatusRequired = SyncFileItem::EncryptionStatus::NotEncrypted;
+    QByteArray _e2eCertificateFingerprint;
+
     // If set, the discovery will finish with an error
     int64_t _size = 0;
     QString _error;
     QPointer<LsColJob> _lsColJob;
+
+    // store top level E2EE folder paths as they are used later when discovering nested folders
+    QSet<QString> _topLevelE2eeFolderPaths;
 
 public:
     QByteArray _dataFingerprint;
@@ -178,6 +233,8 @@ class DiscoveryPhase : public QObject
      * itemDiscovered() will already have been emitted for the item.
      */
     QMap<QString, SyncFileItemPtr> _deletedItem;
+
+    QVector<QString> _directoryNamesToRestoreOnPropagation;
 
     /** Maps the db-path of a deleted folder to its queued job.
      *
@@ -210,7 +267,7 @@ class DiscoveryPhase : public QObject
      * Useful for avoiding processing of items that have already been claimed in
      * a rename (would otherwise be discovered as deletions).
      */
-    bool isRenamed(const QString &p) const { return _renamedItemsLocal.contains(p) || _renamedItemsRemote.contains(p); }
+    [[nodiscard]] bool isRenamed(const QString &p) const;
 
     int _currentlyActiveJobs = 0;
 
@@ -220,19 +277,28 @@ class DiscoveryPhase : public QObject
 
     void scheduleMoreJobs();
 
-    bool isInSelectiveSyncBlackList(const QString &path) const;
+    [[nodiscard]] bool isInSelectiveSyncBlackList(const QString &path) const;
+
+    [[nodiscard]] bool activeFolderSizeLimit() const;
+    [[nodiscard]] bool notifyExistingFolderOverLimit() const;
+
+    void checkFolderSizeLimit(const QString &path,
+			      const std::function<void(bool)> callback);
 
     // Check if the new folder should be deselected or not.
     // May be async. "Return" via the callback, true if the item is blacklisted
-    void checkSelectiveSyncNewFolder(const QString &path, RemotePermissions rp,
-        std::function<void(bool)> callback);
+    void checkSelectiveSyncNewFolder(const QString &path,
+                                     const RemotePermissions rp,
+                                     const std::function<void(bool)> callback);
+
+    void checkSelectiveSyncExistingFolder(const QString &path);
 
     /** Given an original path, return the target path obtained when renaming is done.
      *
      * Note that it only considers parent directory renames. So if A/B got renamed to C/D,
      * checking A/B/file would yield C/D/file, but checking A/B would yield A/B.
      */
-    QString adjustRenamedPath(const QString &original, SyncFileItem::Direction) const;
+    [[nodiscard]] QString adjustRenamedPath(const QString &original, SyncFileItem::Direction) const;
 
     /** If the db-path is scheduled for deletion, abort it.
      *
@@ -247,16 +313,19 @@ class DiscoveryPhase : public QObject
      */
     QPair<bool, QByteArray> findAndCancelDeletedJob(const QString &originalPath);
 
+    void enqueueDirectoryToDelete(const QString &path, ProcessDirectoryJob* const directoryJob);
+
 public:
     // input
     QString _localDir; // absolute path to the local directory. ends with '/'
     QString _remoteFolder; // remote folder, ends with '/'
-    SyncJournalDb *_statedb;
+    SyncJournalDb *_statedb = nullptr;
     AccountPtr _account;
     SyncOptions _syncOptions;
-    ExcludedFiles *_excludes;
-    QRegExp _invalidFilenameRx; // FIXME: maybe move in ExcludedFiles
+    ExcludedFiles *_excludes = nullptr;
+    QRegularExpression _invalidFilenameRx; // FIXME: maybe move in ExcludedFiles
     QStringList _serverBlacklistedFiles; // The blacklist from the capabilities
+    QStringList _leadingAndTrailingSpacesFilesAllowed;
     bool _ignoreHiddenFiles = false;
     std::function<bool(const QString &)> _shouldDiscoverLocaly;
 
@@ -268,14 +337,26 @@ public:
     // output
     QByteArray _dataFingerprint;
     bool _anotherSyncNeeded = false;
+    QHash<QString, long long> _filesNeedingScheduledSync;
+    QVector<QString> _filesUnscheduleSync;
+
+    QStringList _listExclusiveFiles;
+
+    bool _hasUploadErrorItems = false;
+    bool _hasDownloadRemovedItems = false;
+
+    bool _noCaseConflictRecordsInDb = false;
+
+    QSet<QString> _topLevelE2eeFolderPaths;
 
 signals:
-    void fatalError(const QString &errorString);
-    void itemDiscovered(const SyncFileItemPtr &item);
+    void fatalError(const QString &errorString, const OCC::ErrorCategory errorCategory);
+    void itemDiscovered(const OCC::SyncFileItemPtr &item);
     void finished();
 
     // A new folder was discovered and was not synced because of the confirmation feature
     void newBigFolder(const QString &folder, bool isExternal);
+    void existingFolderNowBig(const QString &folder);
 
     /** For excluded items that don't show up in itemDiscovered()
       *
@@ -283,7 +364,11 @@ signals:
       */
     void silentlyExcluded(const QString &folderPath);
 
-    void addErrorToGui(SyncFileItem::Status status, const QString &errorMessage, const QString &subject);
+    void addErrorToGui(const SyncFileItem::Status status, const QString &errorMessage, const QString &subject, const OCC::ErrorCategory category);
+
+    void remnantReadOnlyFolderDiscovered(const OCC::SyncFileItemPtr &item);
+private slots:
+    void slotItemDiscovered(const OCC::SyncFileItemPtr &item);
 };
 
 /// Implementation of DiscoveryPhase::adjustRenamedPath

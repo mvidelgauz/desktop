@@ -38,20 +38,20 @@ class Flow2AuthCredsPage : public AbstractCredentialsWizardPage
 public:
     Flow2AuthCredsPage();
 
-    AbstractCredentials *getCredentials() const override;
+    [[nodiscard]] AbstractCredentials *getCredentials() const override;
 
     void initializePage() override;
     void cleanupPage() override;
-    int nextId() const override;
+    [[nodiscard]] int nextId() const override;
     void setConnected();
-    bool isComplete() const override;
+    [[nodiscard]] bool isComplete() const override;
 
 public Q_SLOTS:
     void slotFlow2AuthResult(Flow2Auth::Result, const QString &errorString, const QString &user, const QString &appPassword);
     void slotPollNow();
     void slotStyleChanged();
 
-signals:
+Q_SIGNALS:
     void connectToOCUrl(const QString &);
     void pollNow();
     void styleChanged();

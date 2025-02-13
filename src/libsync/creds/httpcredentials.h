@@ -40,7 +40,7 @@ namespace OCC {
 
    HttpCredentials is then split in HttpCredentials and HttpCredentialsGui.
 
-   This class handle both HTTP Basic Auth and OAuth. But anything that needs GUI to ask the user
+   This class handles HTTP Basic Auth. But anything that needs GUI to ask the user
    is in HttpCredentialsGui.
 
    The authentication mechanism looks like this.
@@ -52,13 +52,13 @@ namespace OCC {
                 v                            }
           slotReadClientCertPEMJobDone       }     There are first 3 QtKeychain jobs to fetch
                 |                             }   the TLS client keys, if any, and the password
-                v                            }      (or refresh token
+                v                            }
           slotReadClientKeyPEMJobDone        }
                 |                           }
                 v
             slotReadJobDone
                 |        |
-                |        +-------> emit fetched()   if OAuth is not used
+                |        +-------> emit fetched()
                 |
                 v
             refreshAccessToken()
@@ -83,30 +83,22 @@ public:
     explicit HttpCredentials(const QString &user, const QString &password,
             const QByteArray &clientCertBundle = QByteArray(), const QByteArray &clientCertPassword = QByteArray());
 
-    QString authType() const override;
-    QNetworkAccessManager *createQNAM() const override;
-    bool ready() const override;
+    [[nodiscard]] QString authType() const override;
+    [[nodiscard]] QNetworkAccessManager *createQNAM() const override;
+    [[nodiscard]] bool ready() const override;
     void fetchFromKeychain() override;
     bool stillValid(QNetworkReply *reply) override;
     void persist() override;
-    QString user() const override;
+    [[nodiscard]] QString user() const override;
     // the password or token
-    QString password() const override;
+    [[nodiscard]] QString password() const override;
     void invalidateToken() override;
     void forgetSensitiveData() override;
     QString fetchUser();
     virtual bool sslIsTrusted() { return false; }
 
-    /* If we still have a valid refresh token, try to refresh it assynchronously and emit fetched()
-     * otherwise return false
-     */
-    bool refreshAccessToken();
-
     // To fetch the user name as early as possible
     void setAccount(Account *account) override;
-
-    // Whether we are using OAuth
-    bool isUsingOAuth() const { return !_refreshToken.isNull(); }
 
     bool retryIfNeeded(AbstractNetworkJob *) override;
 
@@ -157,21 +149,18 @@ protected:
     bool unpackClientCertBundle();
 
     QString _user;
-    QString _password; // user's password, or access_token for OAuth
-    QString _refreshToken; // OAuth _refreshToken, set if OAuth is used.
+    QString _password; // user's password
     QString _previousPassword;
 
     QString _fetchErrorString;
     bool _ready = false;
-    bool _isRenewingOAuthToken = false;
+
     QByteArray _clientCertBundle;
     QByteArray _clientCertPassword;
     QSslKey _clientSslKey;
     QSslCertificate _clientSslCertificate;
     bool _keychainMigration = false;
     bool _retryOnKeyChainError = true; // true if we haven't done yet any reading from keychain
-
-    QVector<QPointer<AbstractNetworkJob>> _retryQueue; // Jobs we need to retry once the auth token is fetched
 };
 
 

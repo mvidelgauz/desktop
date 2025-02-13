@@ -1,12 +1,23 @@
 #include <QTest>
 
 #include "capabilities.h"
+#include "logger.h"
+
+#include <QStandardPaths>
 
 class TestCapabilities : public QObject
 {
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void testPushNotificationsAvailable_pushNotificationsForActivitiesAvailable_returnTrue()
     {
         QStringList typeList;
@@ -242,6 +253,63 @@ private slots:
         const auto defaultSharePermissionsAvailable = capabilities.shareDefaultPermissions();
 
         QCOMPARE(defaultSharePermissionsAvailable, 31);
+    }
+
+    void testBulkUploadAvailable_bulkUploadAvailable_returnTrue()
+    {
+        QVariantMap bulkuploadMap;
+        bulkuploadMap["bulkupload"] = "1.0";
+
+        QVariantMap capabilitiesMap;
+        capabilitiesMap["dav"] = bulkuploadMap;
+
+        const auto &capabilities = OCC::Capabilities(capabilitiesMap);
+        const auto bulkuploadAvailable = capabilities.bulkUpload();
+
+        QCOMPARE(bulkuploadAvailable, true);
+    }
+
+    void testFilesLockAvailable_filesLockAvailable_returnTrue()
+    {
+        QVariantMap filesMap;
+        filesMap["locking"] = "1.0";
+
+        QVariantMap capabilitiesMap;
+        capabilitiesMap["files"] = filesMap;
+
+        const auto &capabilities = OCC::Capabilities(capabilitiesMap);
+        const auto filesLockAvailable = capabilities.filesLockAvailable();
+
+        QCOMPARE(filesLockAvailable, true);
+    }
+
+    void testSupport_hasValidSubscription_returnTrue()
+    {
+        QVariantMap supportMap;
+        supportMap["hasValidSubscription"] = "true";
+
+        QVariantMap capabilitiesMap;
+        capabilitiesMap["support"] = supportMap;
+
+        const auto &capabilities = OCC::Capabilities(capabilitiesMap);
+        const auto serverHasValidSubscription = capabilities.serverHasValidSubscription();
+
+        QCOMPARE(serverHasValidSubscription, true);
+    }
+
+    void testSupport_desktopEnterpriseChannel_returnString()
+    {
+        QVariantMap supportMap;
+        const auto defaultChannel = "stable";
+        supportMap["desktopEnterpriseChannel"] = defaultChannel;
+
+        QVariantMap capabilitiesMap;
+        capabilitiesMap["support"] = supportMap;
+
+        const auto &capabilities = OCC::Capabilities(capabilitiesMap);
+        const auto enterpriseChannel = capabilities.desktopEnterpriseChannel();
+
+        QCOMPARE(enterpriseChannel, defaultChannel);
     }
 };
 

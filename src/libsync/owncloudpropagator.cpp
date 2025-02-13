@@ -21,6 +21,9 @@
 #include "propagateremotedelete.h"
 #include "propagateremotemove.h"
 #include "propagateremotemkdir.h"
+#include "bulkpropagatorjob.h"
+#include "updatee2eefoldermetadatajob.h"
+#include "updatemigratede2eemetadatajob.h"
 #include "propagatorjobs.h"
 #include "filesystem.h"
 #include "common/utility.h"
@@ -28,6 +31,7 @@
 #include "common/asserts.h"
 #include "discoveryphase.h"
 #include "syncfileitem.h"
+#include "foldermetadata.h"
 
 #ifdef Q_OS_WIN
 #include <windef.h>
@@ -48,6 +52,7 @@ namespace OCC {
 
 Q_LOGGING_CATEGORY(lcPropagator, "nextcloud.sync.propagator", QtInfoMsg)
 Q_LOGGING_CATEGORY(lcDirectory, "nextcloud.sync.propagator.directory", QtInfoMsg)
+Q_LOGGING_CATEGORY(lcRootDirectory, "nextcloud.sync.propagator.root.directory", QtInfoMsg)
 Q_LOGGING_CATEGORY(lcCleanupPolls, "nextcloud.sync.propagator.cleanuppolls", QtInfoMsg)
 
 qint64 criticalFreeSpaceLimit()
@@ -172,7 +177,7 @@ static SyncJournalErrorBlacklistRecord createBlacklistEntry(
  *
  * May adjust the status or item._errorString.
  */
-static void blacklistUpdate(SyncJournalDb *journal, SyncFileItem &item)
+void blacklistUpdate(SyncJournalDb *journal, SyncFileItem &item)
 {
     SyncJournalErrorBlacklistRecord oldEntry = journal->errorBlacklistEntry(item._file);
 
@@ -218,13 +223,15 @@ static void blacklistUpdate(SyncJournalDb *journal, SyncFileItem &item)
     }
 }
 
-void PropagateItemJob::done(SyncFileItem::Status statusArg, const QString &errorString)
+void PropagateItemJob::done(const SyncFileItem::Status statusArg, const QString &errorString, const ErrorCategory category)
 {
     // Duplicate calls to done() are a logic error
     ENFORCE(_state != Finished);
     _state = Finished;
 
     _item->_status = statusArg;
+
+    reportClientStatuses();
 
     if (_item->_isRestoration) {
         if (_item->_status == SyncFileItem::Success
@@ -271,6 +278,8 @@ void PropagateItemJob::done(SyncFileItem::Status statusArg, const QString &error
     case SyncFileItem::BlacklistedError:
     case SyncFileItem::FileLocked:
     case SyncFileItem::FileNameInvalid:
+    case SyncFileItem::FileNameInvalidOnServer:
+    case SyncFileItem::FileNameClash:
         // nothing
         break;
     }
@@ -279,7 +288,7 @@ void PropagateItemJob::done(SyncFileItem::Status statusArg, const QString &error
         qCWarning(lcPropagator) << "Could not complete propagation of" << _item->destination() << "by" << this << "with status" << _item->_status << "and error:" << _item->_errorString;
     else
         qCInfo(lcPropagator) << "Completed propagation of" << _item->destination() << "by" << this << "with status" << _item->_status;
-    emit propagator()->itemCompleted(_item);
+    emit propagator()->itemCompleted(_item, category);
     emit finished(_item->_status);
 
     if (_item->_status == SyncFileItem::FatalError) {
@@ -298,33 +307,43 @@ void PropagateItemJob::slotRestoreJobFinished(SyncFileItem::Status status)
 
     if (status == SyncFileItem::Success || status == SyncFileItem::Conflict
         || status == SyncFileItem::Restoration) {
-        done(SyncFileItem::SoftError, msg);
+        done(SyncFileItem::SoftError, msg, ErrorCategory::GenericError);
     } else {
-        done(status, tr("A file or folder was removed from a read only share, but restoring failed: %1").arg(msg));
+        done(status, tr("A file or folder was removed from a read only share, but restoring failed: %1").arg(msg), ErrorCategory::GenericError);
     }
 }
 
 bool PropagateItemJob::hasEncryptedAncestor() const
 {
-    if (!propagator()->account()->capabilities().clientSideEncryptionAvailable()) {
-        return false;
-    }
+    SyncJournalFileRecord rec;
+    return propagator()->_journal->findEncryptedAncestorForRecord(_item->_file, &rec)
+        && rec.isValid() && rec.isE2eEncrypted();
+}
 
-    const auto path = _item->_file;
-    const auto slashPosition = path.lastIndexOf('/');
-    const auto parentPath = slashPosition >= 0 ? path.left(slashPosition) : QString();
-
-    auto pathComponents = parentPath.split('/');
-    while (!pathComponents.isEmpty()) {
-        SyncJournalFileRecord rec;
-        propagator()->_journal->getFileRecord(pathComponents.join('/'), &rec);
-        if (rec.isValid() && rec._isE2eEncrypted) {
-            return true;
+void PropagateItemJob::reportClientStatuses()
+{
+    if (_item->_status == SyncFileItem::Status::FileNameClash) {
+        if (_item->_direction != SyncFileItem::Direction::Up) {
+            propagator()->account()->reportClientStatus(ClientStatusReportingStatus::DownloadError_ConflictInvalidCharacters);
         }
-        pathComponents.removeLast();
+    } else if (_item->_status == SyncFileItem::Status::FileNameInvalid) {
+        propagator()->account()->reportClientStatus(ClientStatusReportingStatus::DownloadError_ConflictInvalidCharacters);
+    } else if (_item->_httpErrorCode != HttpErrorCodeNone && _item->_httpErrorCode != HttpErrorCodeSuccess
+               && _item->_httpErrorCode != HttpErrorCodeSuccessCreated && _item->_httpErrorCode != HttpErrorCodeSuccessNoContent) {
+        if (_item->_direction == SyncFileItem::Up) {
+            const auto isCodeBadReqOrUnsupportedMediaType =
+                (_item->_httpErrorCode == HttpErrorCodeBadRequest || _item->_httpErrorCode == HttpErrorCodeUnsupportedMediaType);
+            const auto isExceptionInfoPresent = !_item->_errorExceptionName.isEmpty() && !_item->_errorExceptionMessage.isEmpty();
+            if (isCodeBadReqOrUnsupportedMediaType && isExceptionInfoPresent && _item->_errorExceptionName.contains(QStringLiteral("UnsupportedMediaType"))
+                && _item->_errorExceptionMessage.contains(QStringLiteral("virus"), Qt::CaseInsensitive)) {
+                propagator()->account()->reportClientStatus(ClientStatusReportingStatus::UploadError_Virus_Detected);
+            } else {
+                propagator()->account()->reportClientStatus(ClientStatusReportingStatus::UploadError_ServerError);
+            }
+        } else {
+            propagator()->account()->reportClientStatus(ClientStatusReportingStatus::DownloadError_ServerError);
+        }
     }
-
-    return false;
 }
 
 // ================================================================================
@@ -359,15 +378,13 @@ PropagateItemJob *OwncloudPropagator::createJob(const SyncFileItemPtr &item)
             job->setDeleteExistingFolder(deleteExisting);
             return job;
         } else {
-            PropagateUploadFileCommon *job = nullptr;
-            if (item->_size > syncOptions()._initialChunkSize && account()->capabilities().chunkingNg()) {
-                // Item is above _initialChunkSize, thus will be classified as to be chunked
-                job = new PropagateUploadFileNG(this, item);
+            if (deleteExisting || !isDelayedUploadItem(item)) {
+                auto job = createUploadJob(item, deleteExisting);
+                return job.release();
             } else {
-                job = new PropagateUploadFileV1(this, item);
+                pushDelayedUploadTask(item);
+                return nullptr;
             }
-            job->setDeleteExisting(deleteExisting);
-            return job;
         }
     case CSYNC_INSTRUCTION_RENAME:
         if (item->_direction == SyncFileItem::Up) {
@@ -375,13 +392,114 @@ PropagateItemJob *OwncloudPropagator::createJob(const SyncFileItemPtr &item)
         } else {
             return new PropagateLocalRename(this, item);
         }
+    case CSYNC_INSTRUCTION_UPDATE_VFS_METADATA:
+        return new PropagateVfsUpdateMetadataJob(this, item);
+    case CSYNC_INSTRUCTION_UPDATE_ENCRYPTION_METADATA:
+    {
+        const auto rootE2eeFolderPath = item->_file.split('/').first();
+        const auto rootE2eeFolderPathFullRemotePath = fullRemotePath(rootE2eeFolderPath);
+        return new UpdateMigratedE2eeMetadataJob(this, item, rootE2eeFolderPathFullRemotePath, remotePath());
+    }
     case CSYNC_INSTRUCTION_IGNORE:
     case CSYNC_INSTRUCTION_ERROR:
         return new PropagateIgnoreJob(this, item);
-    default:
+    case CSYNC_INSTRUCTION_NONE:
+    case CSYNC_INSTRUCTION_EVAL:
+    case CSYNC_INSTRUCTION_EVAL_RENAME:
+    case CSYNC_INSTRUCTION_STAT_ERROR:
+    case CSYNC_INSTRUCTION_UPDATE_METADATA:
+    case CSYNC_INSTRUCTION_CASE_CLASH_CONFLICT:
         return nullptr;
     }
     return nullptr;
+}
+
+std::unique_ptr<PropagateUploadFileCommon> OwncloudPropagator::createUploadJob(SyncFileItemPtr item, bool deleteExisting)
+{
+    auto job = std::unique_ptr<PropagateUploadFileCommon>{};
+
+    if (item->_size > syncOptions()._initialChunkSize && account()->capabilities().chunkingNg()) {
+        // Item is above _initialChunkSize, thus will be classified as to be chunked
+        job = std::make_unique<PropagateUploadFileNG>(this, item);
+    } else {
+        job = std::make_unique<PropagateUploadFileV1>(this, item);
+    }
+
+    job->setDeleteExisting(deleteExisting);
+
+    removeFromBulkUploadBlackList(item->_file);
+
+    return job;
+}
+
+void OwncloudPropagator::pushDelayedUploadTask(SyncFileItemPtr item)
+{
+    _delayedTasks.push_back(item);
+}
+
+void OwncloudPropagator::resetDelayedUploadTasks()
+{
+    _scheduleDelayedTasks = false;
+    _delayedTasks.clear();
+}
+
+void OwncloudPropagator::adjustDeletedFoldersWithNewChildren(SyncFileItemVector &items)
+{
+    /* 
+       process each item that is new and is a directory and make sure every parent in its tree has the instruction CSYNC_INSTRUCTION_NEW
+       instead of CSYNC_INSTRUCTION_REMOVE
+       NOTE: We are iterating backwards to take advantage of optimization later, when searching for the parent of current it
+    */
+    for (auto it = std::crbegin(items); it != std::crend(items); ++it) {
+        if ((*it)->_instruction != CSYNC_INSTRUCTION_NEW || (*it)->_direction != SyncFileItem::Up || !(*it)->isDirectory() || (*it)->_file == QStringLiteral("/")) {
+            continue;
+        }
+
+        // #1 get root folder name for the current item that we need to reupload
+        const auto folderPathSplit = (*it)->_file.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        if (folderPathSplit.isEmpty()) {
+            continue;
+        }
+        const auto itemRootFolderName = folderPathSplit.first();
+        if (itemRootFolderName.isEmpty()) {
+            continue;
+        }
+        // #2 iterate backwards (for optimization) and find the root folder by name
+        const auto itemRootFolderReverseIt = std::find_if(it, std::crend(items), [&itemRootFolderName](const auto &currentItem) {
+            return currentItem->_file == itemRootFolderName;
+        });
+
+        if (itemRootFolderReverseIt == std::rend(items)) {
+            continue;
+        }
+
+        // #3 convert reverse iterator to normal iterator
+        const auto itemFolderIt = (itemRootFolderReverseIt + 1).base();
+
+        // #4 if the root folder is set to be removed, then we will need to fix this by reuploading every folder in
+        // the tree, including the root
+        if (itemFolderIt == std::end(items)) {
+            continue;
+        }
+
+        auto nextFolderInTreeIt = itemFolderIt;
+        do {
+            // #5 Iterate forward from the CSYNC_INSTRUCTION_NEW folder's root, and make sure every folder in it's tree is set to CSYNC_INSTRUCTION_NEW
+            if ((*nextFolderInTreeIt)->isDirectory()
+                && (*nextFolderInTreeIt)->_instruction == CSYNC_INSTRUCTION_REMOVE
+                && (*nextFolderInTreeIt)->_direction == SyncFileItem::Down
+                && (*it)->_file.startsWith(QString((*nextFolderInTreeIt)->_file) + QLatin1Char('/'))) {
+
+                qCWarning(lcPropagator) << "WARNING: New directory to upload " << (*it)->_file
+                    << "is in the removed directories tree " << (*nextFolderInTreeIt)->_file
+                    << " This should not happen! But, we are going to reupload the entire folder structure.";
+
+                (*nextFolderInTreeIt)->_instruction = CSYNC_INSTRUCTION_NEW;
+                (*nextFolderInTreeIt)->_direction = SyncFileItem::Up;
+            }
+            ++nextFolderInTreeIt;
+        } while (nextFolderInTreeIt != std::end(items) && (*nextFolderInTreeIt)->_file != (*it)->_file);
+    }
 }
 
 qint64 OwncloudPropagator::smallFileSize()
@@ -394,6 +512,8 @@ void OwncloudPropagator::start(SyncFileItemVector &&items)
 {
     Q_ASSERT(std::is_sorted(items.begin(), items.end()));
 
+    _abortRequested = false;
+
     /* This builds all the jobs needed for the propagation.
      * Each directory is a PropagateDirectory job, which contains the files in it.
      * In order to do that we loop over the items. (which are sorted by destination)
@@ -401,24 +521,34 @@ void OwncloudPropagator::start(SyncFileItemVector &&items)
 
     const auto regex = syncOptions().fileRegex();
     if (regex.isValid()) {
-        QSet<QStringRef> names;
+        QSet<QStringView> names;
         for (auto &i : items) {
             if (regex.match(i->_file).hasMatch()) {
                 int index = -1;
-                QStringRef ref;
+                QStringView ref;
                 do {
-                    ref = i->_file.midRef(0, index);
+                    ref = i->_file.mid(0, index);
                     names.insert(ref);
                     index = ref.lastIndexOf(QLatin1Char('/'));
                 } while (index > 0);
             }
         }
         items.erase(std::remove_if(items.begin(), items.end(), [&names](auto i) {
-            return !names.contains(QStringRef { &i->_file });
+            return !names.contains(QStringView { i->_file });
         }),
             items.end());
     }
 
+    QStringList files;
+
+    for (const auto &item : items) {
+        files.push_back(item->_file);
+    }
+
+    // process each item that is new and is a directory and make sure every parent in its tree has the instruction NEW instead of REMOVE
+    adjustDeletedFoldersWithNewChildren(items);
+
+    resetDelayedUploadTasks();
     _rootJob.reset(new PropagateRootDirectory(this));
     QStack<QPair<QString /* directory name */, PropagateDirectory * /* job */>> directories;
     directories.push(qMakePair(QString(), _rootJob.data()));
@@ -474,67 +604,160 @@ void OwncloudPropagator::start(SyncFileItemVector &&items)
         }
 
         if (item->isDirectory()) {
-            auto *dir = new PropagateDirectory(this, item);
-
-            if (item->_instruction == CSYNC_INSTRUCTION_TYPE_CHANGE
-                && item->_direction == SyncFileItem::Up) {
-                // Skip all potential uploads to the new folder.
-                // Processing them now leads to problems with permissions:
-                // checkForPermissions() has already run and used the permissions
-                // of the file we're about to delete to decide whether uploading
-                // to the new dir is ok...
-                foreach (const SyncFileItemPtr &item2, items) {
-                    if (item2->destination().startsWith(item->destination() + "/")) {
-                        item2->_instruction = CSYNC_INSTRUCTION_NONE;
-                        _anotherSyncNeeded = true;
-                    }
-                }
-            }
-
-            if (item->_instruction == CSYNC_INSTRUCTION_REMOVE) {
-                // We do the removal of directories at the end, because there might be moves from
-                // these directories that will happen later.
-                directoriesToRemove.prepend(dir);
-                removedDirectory = item->_file + "/";
-
-                // We should not update the etag of parent directories of the removed directory
-                // since it would be done before the actual remove (issue #1845)
-                // NOTE: Currently this means that we don't update those etag at all in this sync,
-                //       but it should not be a problem, they will be updated in the next sync.
-                for (int i = 0; i < directories.size(); ++i) {
-                    if (directories[i].second->_item->_instruction == CSYNC_INSTRUCTION_UPDATE_METADATA)
-                        directories[i].second->_item->_instruction = CSYNC_INSTRUCTION_NONE;
-                }
-            } else {
-                PropagateDirectory *currentDirJob = directories.top().second;
-                currentDirJob->appendJob(dir);
-            }
-            directories.push(qMakePair(item->destination() + "/", dir));
-        } else {
-            if (item->_instruction == CSYNC_INSTRUCTION_TYPE_CHANGE) {
-                // will delete directories, so defer execution
-                directoriesToRemove.prepend(createJob(item));
-                removedDirectory = item->_file + "/";
-            } else {
-                directories.top().second->appendTask(item);
-            }
-
-            if (item->_instruction == CSYNC_INSTRUCTION_CONFLICT) {
-                // This might be a file or a directory on the local side. If it's a
-                // directory we want to skip processing items inside it.
-                maybeConflictDirectory = item->_file + "/";
-            }
+            startDirectoryPropagation(item,
+                                      directories,
+                                      directoriesToRemove,
+                                      removedDirectory,
+                                      items);
+        } else if (!directories.top().second->_item->_isFileDropDetected) {
+            startFilePropagation(item,
+                                 directories,
+                                 directoriesToRemove,
+                                 removedDirectory,
+                                 maybeConflictDirectory);
         }
     }
 
     foreach (PropagatorJob *it, directoriesToRemove) {
-        _rootJob->_dirDeletionJobs.appendJob(it);
+        _rootJob->appendDirDeletionJob(it);
     }
 
     connect(_rootJob.data(), &PropagatorJob::finished, this, &OwncloudPropagator::emitFinished);
 
     _jobScheduled = false;
     scheduleNextJob();
+}
+
+void OwncloudPropagator::startDirectoryPropagation(const SyncFileItemPtr &item,
+                                                   QStack<QPair<QString, PropagateDirectory *>> &directories,
+                                                   QVector<PropagatorJob *> &directoriesToRemove,
+                                                   QString &removedDirectory,
+                                                   const SyncFileItemVector &items)
+{
+    auto directoryPropagationJob = std::make_unique<PropagateDirectory>(this, item);
+
+    if (item->_instruction == CSYNC_INSTRUCTION_TYPE_CHANGE
+        && item->_direction == SyncFileItem::Up) {
+        // Skip all potential uploads to the new folder.
+        // Processing them now leads to problems with permissions:
+        // checkForPermissions() has already run and used the permissions
+        // of the file we're about to delete to decide whether uploading
+        // to the new dir is ok...
+        foreach (const SyncFileItemPtr &dirItem, items) {
+            if (dirItem->destination().startsWith(item->destination() + "/")) {
+                dirItem->_instruction = CSYNC_INSTRUCTION_NONE;
+                _anotherSyncNeeded = true;
+            }
+        }
+    }
+
+    if (item->_instruction == CSYNC_INSTRUCTION_REMOVE) {
+        // We do the removal of directories at the end, because there might be moves from
+        // these directories that will happen later.
+        directoriesToRemove.prepend(directoryPropagationJob.get());
+        removedDirectory = item->_file + "/";
+
+        // We should not update the etag of parent directories of the removed directory
+        // since it would be done before the actual remove (issue #1845)
+        // NOTE: Currently this means that we don't update those etag at all in this sync,
+        //       but it should not be a problem, they will be updated in the next sync.
+        for (int i = 0; i < directories.size(); ++i) {
+            if (directories[i].second->_item->_instruction == CSYNC_INSTRUCTION_UPDATE_METADATA) {
+                directories[i].second->_item->_instruction = CSYNC_INSTRUCTION_NONE;
+            }
+        }
+    } else {
+        const auto currentDirJob = directories.top().second;
+        currentDirJob->appendJob(directoryPropagationJob.get());
+    }
+    directories.push(qMakePair(item->destination() + "/", directoryPropagationJob.release()));
+    if (item->_isFileDropDetected) {
+        const auto currentDirJob = directories.top().second;
+        currentDirJob->appendJob(new UpdateE2eeFolderMetadataJob(this, item, item->_file));
+        item->_instruction = CSYNC_INSTRUCTION_UPDATE_METADATA;
+        _anotherSyncNeeded = true;
+    } else if (item->_isEncryptedMetadataNeedUpdate) {
+        processE2eeMetadataMigration(item, directories);
+    }
+}
+
+void OwncloudPropagator::startFilePropagation(const SyncFileItemPtr &item,
+                                              QStack<QPair<QString, PropagateDirectory *> > &directories,
+                                              QVector<PropagatorJob *> &directoriesToRemove,
+                                              QString &removedDirectory,
+                                              QString &maybeConflictDirectory)
+{
+    if (item->_instruction == CSYNC_INSTRUCTION_TYPE_CHANGE) {
+        // will delete directories, so defer execution
+        auto job = createJob(item);
+        if (job) {
+            directoriesToRemove.prepend(job);
+        }
+        removedDirectory = item->_file + "/";
+    } else {
+        directories.top().second->appendTask(item);
+    }
+
+    if (item->_instruction == CSYNC_INSTRUCTION_CONFLICT) {
+        // This might be a file or a directory on the local side. If it's a
+        // directory we want to skip processing items inside it.
+        maybeConflictDirectory = item->_file + "/";
+    }
+}
+
+void OwncloudPropagator::processE2eeMetadataMigration(const SyncFileItemPtr &item, QStack<QPair<QString, PropagateDirectory *>> &directories)
+{
+    if (item->_e2eEncryptionServerCapability >= EncryptionStatusEnums::ItemEncryptionStatus::EncryptedMigratedV2_0) {
+        // migrating to v2.0+
+        const auto rootE2eeFolderPath = item->_file.split('/').first();
+        const auto rootE2eeFolderPathWithSlash = QString(rootE2eeFolderPath + "/");
+
+        QPair<QString, PropagateDirectory *> foundDirectory = {QString{}, nullptr};
+        for (auto it = std::rbegin(directories); it != std::rend(directories); ++it) {
+            if (it->first == rootE2eeFolderPathWithSlash) {
+                foundDirectory = *it;
+                break;
+            }
+        }
+
+        UpdateMigratedE2eeMetadataJob *existingUpdateJob = nullptr;
+
+        SyncFileItemPtr topLevelitem = item;
+        if (foundDirectory.second) {
+            topLevelitem = foundDirectory.second->_item;
+            if (!foundDirectory.second->_subJobs._jobsToDo.isEmpty()) {
+                for (const auto jobToDo : foundDirectory.second->_subJobs._jobsToDo) {
+                    if (const auto foundExistingUpdateMigratedE2eeMetadataJob = qobject_cast<UpdateMigratedE2eeMetadataJob *>(jobToDo)) {
+                        existingUpdateJob = foundExistingUpdateMigratedE2eeMetadataJob;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!existingUpdateJob) {
+            // we will need to update topLevelitem encryption status so it gets written to database
+            const auto currentDirJob = directories.top().second;
+            const auto rootE2eeFolderPathFullRemotePath = fullRemotePath(rootE2eeFolderPath);
+            const auto updateMetadataJob = new UpdateMigratedE2eeMetadataJob(this, topLevelitem, rootE2eeFolderPathFullRemotePath, remotePath());
+            if (item != topLevelitem) {
+                updateMetadataJob->addSubJobItem(item->_encryptedFileName, item);
+            }
+            currentDirJob->appendJob(updateMetadataJob);
+        } else {
+            if (item != topLevelitem) {
+                // simply append subJob item so we can set its encryption status when corresponging subjob finishes
+                existingUpdateJob->addSubJobItem(item->_encryptedFileName, item);
+            }
+        }
+    } else {
+        // migrating to v1.2
+        const auto remoteFilename = item->_encryptedFileName.isEmpty() ? item->_file : item->_encryptedFileName;
+        const auto currentDirJob = directories.top().second;
+        currentDirJob->appendJob(new UpdateE2eeFolderMetadataJob(this, item, remoteFilename));
+    }
+
+    item->_instruction = CSYNC_INSTRUCTION_UPDATE_METADATA;
 }
 
 const SyncOptions &OwncloudPropagator::syncOptions() const
@@ -554,7 +777,6 @@ bool OwncloudPropagator::localFileNameClash(const QString &relFile)
     Q_ASSERT(!file.isEmpty());
 
     if (!file.isEmpty() && Utility::fsCasePreserving()) {
-        qCDebug(lcPropagator) << "CaseClashCheck for " << file;
 #ifdef Q_OS_MAC
         const QFileInfo fileInfo(file);
         if (!fileInfo.exists()) {
@@ -569,7 +791,7 @@ bool OwncloudPropagator::localFileNameClash(const QString &relFile)
         }
 #elif defined(Q_OS_WIN)
         WIN32_FIND_DATA FindFileData;
-        HANDLE hFind;
+        HANDLE hFind = nullptr;
 
         hFind = FindFirstFileW(reinterpret_cast<const wchar_t *>(FileSystem::longWinPath(file).utf16()), &FindFileData);
         if (hFind == INVALID_HANDLE_VALUE) {
@@ -590,6 +812,7 @@ bool OwncloudPropagator::localFileNameClash(const QString &relFile)
         const QString fn = fileInfo.fileName();
         const QStringList list = fileInfo.dir().entryList({ fn });
         if (list.count() > 1 || (list.count() == 1 && list[0] != fn)) {
+            qCWarning(lcPropagator) << "Detected case clash between" << file << "and" << list.constFirst();
             return true;
         }
 #endif
@@ -603,7 +826,7 @@ bool OwncloudPropagator::hasCaseClashAccessibilityProblem(const QString &relfile
     bool result = false;
     const QString file(_localDir + relfile);
     WIN32_FIND_DATA FindFileData;
-    HANDLE hFind;
+    HANDLE hFind = nullptr;
 
     hFind = FindFirstFileW(reinterpret_cast<const wchar_t *>(FileSystem::longWinPath(file).utf16()), &FindFileData);
     if (hFind != INVALID_HANDLE_VALUE) {
@@ -712,6 +935,10 @@ bool OwncloudPropagator::createConflict(const SyncFileItemPtr &item,
 
     QString renameError;
     auto conflictModTime = FileSystem::getModTime(fn);
+    if (conflictModTime <= 0) {
+        *error = tr("Impossible to get modification time for file in conflict %1").arg(fn);
+        return false;
+    }
     QString conflictUserName;
     if (account()->capabilities().uploadConflictFiles())
         conflictUserName = account()->davDisplayName();
@@ -774,39 +1001,152 @@ bool OwncloudPropagator::createConflict(const SyncFileItemPtr &item,
     return true;
 }
 
+OCC::Optional<QString> OwncloudPropagator::createCaseClashConflict(const SyncFileItemPtr &item, const QString &temporaryDownloadedFile)
+{
+    auto filename = QString{};
+
+    if (item->_type == ItemType::ItemTypeFile) {
+        filename = fullLocalPath(item->_file);
+    } else if (item->_type == ItemType::ItemTypeVirtualFileDownload) {
+        filename = fullLocalPath(item->_file + syncOptions()._vfs->fileSuffix());
+    }
+
+    const auto conflictModTime = FileSystem::getModTime(filename);
+    if (conflictModTime <= 0) {
+        return tr("Impossible to get modification time for file in conflict %1").arg(filename);
+    }
+
+    const auto conflictFileName = Utility::makeCaseClashConflictFileName(item->_file, Utility::qDateTimeFromTime_t(conflictModTime));
+    const auto conflictFilePath = fullLocalPath(conflictFileName);
+
+    emit touchedFile(filename);
+    emit touchedFile(conflictFilePath);
+
+    qCInfo(lcPropagator) << "rename from" << temporaryDownloadedFile << "to" << conflictFilePath;
+    if (QString renameError; !FileSystem::rename(temporaryDownloadedFile, conflictFilePath, &renameError)) {
+        // If the rename fails, don't replace it.
+
+        // If the file is locked, we want to retry this sync when it
+        // becomes available again.
+        if (FileSystem::isFileLocked(filename)) {
+            emit seenLockedFile(filename);
+        }
+
+        return renameError;
+    }
+    FileSystem::setFileHidden(conflictFilePath, false);
+    qCInfo(lcPropagator) << "Created case clash conflict file" << filename << "->" << conflictFilePath;
+
+    // Create a new conflict record. To get the base etag, we need to read it from the db.
+    auto conflictBasePath = item->_file.toUtf8();
+    if (!item->_renameTarget.isEmpty()) {
+        conflictBasePath = item->_renameTarget.toUtf8();
+    }
+    auto conflictRecord = ConflictRecord{conflictFileName.toUtf8(), {}, item->_previousModtime, {}, conflictBasePath};
+
+    SyncJournalFileRecord baseRecord;
+    if (_journal->getFileRecord(item->_originalFile, &baseRecord) && baseRecord.isValid()) {
+        conflictRecord.baseEtag = baseRecord._etag;
+        conflictRecord.baseFileId = baseRecord._fileId;
+    }
+
+    _journal->setCaseConflictRecord(conflictRecord);
+    account()->reportClientStatus(ClientStatusReportingStatus::DownloadError_ConflictCaseClash);
+
+    // Need a new sync to detect the created copy of the conflicting file
+    _anotherSyncNeeded = true;
+
+    return {};
+}
+
 QString OwncloudPropagator::adjustRenamedPath(const QString &original) const
 {
     return OCC::adjustRenamedPath(_renamedDirectories, original);
 }
 
-Result<Vfs::ConvertToPlaceholderResult, QString> OwncloudPropagator::updateMetadata(const SyncFileItem &item)
+Result<Vfs::ConvertToPlaceholderResult, QString> OwncloudPropagator::updateMetadata(const SyncFileItem &item, Vfs::UpdateMetadataTypes updateType)
 {
-    return OwncloudPropagator::staticUpdateMetadata(item, _localDir, syncOptions()._vfs.data(), _journal);
+    return OwncloudPropagator::staticUpdateMetadata(item, _localDir, syncOptions()._vfs.data(), _journal, updateType);
 }
 
-Result<Vfs::ConvertToPlaceholderResult, QString> OwncloudPropagator::staticUpdateMetadata(const SyncFileItem &item, const QString localDir,
-                                                                                          Vfs *vfs, SyncJournalDb *const journal)
+Result<Vfs::ConvertToPlaceholderResult, QString> OwncloudPropagator::staticUpdateMetadata(const SyncFileItem &item,
+                                                                                          const QString localDir,
+                                                                                          Vfs *vfs,
+                                                                                          SyncJournalDb *const journal,
+                                                                                          Vfs::UpdateMetadataTypes updateType)
 {
     const QString fsPath = localDir + item.destination();
-    const auto result = vfs->convertToPlaceholder(fsPath, item);
-    if (!result) {
-        return result.error();
-    } else if (*result == Vfs::ConvertToPlaceholderResult::Locked) {
-        return Vfs::ConvertToPlaceholderResult::Locked;
-    }
     auto record = item.toSyncJournalFileRecordWithInode(fsPath);
     const auto dBresult = journal->setFileRecord(record);
     if (!dBresult) {
         return dBresult.error();
     }
+
+    const auto result = vfs->convertToPlaceholder(fsPath, item, {}, updateType);
+    if (!result) {
+        return result.error();
+    } else if (*result == Vfs::ConvertToPlaceholderResult::Locked) {
+        return Vfs::ConvertToPlaceholderResult::Locked;
+    }
     return Vfs::ConvertToPlaceholderResult::Ok;
 }
 
-// ================================================================================
+bool OwncloudPropagator::isDelayedUploadItem(const SyncFileItemPtr &item) const
+{
+    const auto checkFileShouldBeEncrypted = [this] (const SyncFileItemPtr &item) -> bool {
+        const auto path = item->_file;
+        const auto slashPosition = path.lastIndexOf('/');
+        const auto parentPath = slashPosition >= 0 ? path.left(slashPosition) : QString();
+
+        SyncJournalFileRecord parentRec;
+        bool ok = _journal->getFileRecord(parentPath, &parentRec);
+        if (!ok) {
+            return false;
+        }
+
+        const auto accountPtr = account();
+
+        if (!parentRec.isValid() ||
+            !parentRec.isE2eEncrypted()) {
+            return false;
+        }
+
+        return true;
+    };
+
+    return account()->capabilities().bulkUpload() && !_scheduleDelayedTasks && !item->isEncrypted() && _syncOptions.minChunkSize() > item->_size
+        && !isInBulkUploadBlackList(item->_file) && !checkFileShouldBeEncrypted(item);
+}
+
+void OwncloudPropagator::setScheduleDelayedTasks(bool active)
+{
+    _scheduleDelayedTasks = active;
+}
+
+void OwncloudPropagator::clearDelayedTasks()
+{
+    _delayedTasks.clear();
+}
+
+void OwncloudPropagator::addToBulkUploadBlackList(const QString &file)
+{
+    qCDebug(lcPropagator) << "black list for bulk upload" << file;
+    _bulkUploadBlackList.insert(file);
+}
+
+void OwncloudPropagator::removeFromBulkUploadBlackList(const QString &file)
+{
+    qCDebug(lcPropagator) << "black list for bulk upload" << file;
+    _bulkUploadBlackList.remove(file);
+}
+
+bool OwncloudPropagator::isInBulkUploadBlackList(const QString &file) const
+{
+    return _bulkUploadBlackList.contains(file);
+}
 
 PropagatorJob::PropagatorJob(OwncloudPropagator *propagator)
     : QObject(propagator)
-    , _state(NotYetStarted)
 {
 }
 
@@ -815,9 +1155,59 @@ OwncloudPropagator *PropagatorJob::propagator() const
     return qobject_cast<OwncloudPropagator *>(parent());
 }
 
+ErrorCategory PropagatorJob::errorCategoryFromNetworkError(const QNetworkReply::NetworkError error)
+{
+    auto result = ErrorCategory::NoError;
+    switch (error)
+    {
+    case QNetworkReply::NoError:
+        result = ErrorCategory::NoError;
+        break;
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::RemoteHostClosedError:
+        result = ErrorCategory::NetworkError;
+        break;
+    case QNetworkReply::ConnectionRefusedError:
+    case QNetworkReply::HostNotFoundError:
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::OperationCanceledError:
+    case QNetworkReply::SslHandshakeFailedError:
+    case QNetworkReply::NetworkSessionFailedError:
+    case QNetworkReply::BackgroundRequestNotAllowedError:
+    case QNetworkReply::TooManyRedirectsError:
+    case QNetworkReply::InsecureRedirectError:
+    case QNetworkReply::UnknownNetworkError:
+    case QNetworkReply::ProxyConnectionRefusedError:
+    case QNetworkReply::ProxyConnectionClosedError:
+    case QNetworkReply::ProxyNotFoundError:
+    case QNetworkReply::ProxyTimeoutError:
+    case QNetworkReply::ProxyAuthenticationRequiredError:
+    case QNetworkReply::UnknownProxyError:
+    case QNetworkReply::ContentAccessDenied:
+    case QNetworkReply::ContentOperationNotPermittedError:
+    case QNetworkReply::ContentNotFoundError:
+    case QNetworkReply::AuthenticationRequiredError:
+    case QNetworkReply::ContentReSendError:
+    case QNetworkReply::ContentConflictError:
+    case QNetworkReply::ContentGoneError:
+    case QNetworkReply::UnknownContentError:
+    case QNetworkReply::ProtocolUnknownError:
+    case QNetworkReply::ProtocolInvalidOperationError:
+    case QNetworkReply::ProtocolFailure:
+    case QNetworkReply::InternalServerError:
+    case QNetworkReply::OperationNotImplementedError:
+    case QNetworkReply::ServiceUnavailableError:
+    case QNetworkReply::UnknownServerError:
+        result = ErrorCategory::GenericError;
+        break;
+    }
+
+    return result;
+}
+
 // ================================================================================
 
-PropagatorJob::JobParallelism PropagatorCompositeJob::parallelism()
+PropagatorJob::JobParallelism PropagatorCompositeJob::parallelism() const
 {
     // If any of the running sub jobs is not parallel, we have to wait
     for (int i = 0; i < _runningJobs.count(); ++i) {
@@ -857,7 +1247,7 @@ bool PropagatorCompositeJob::scheduleSelfOrChild()
     }
 
     // Ask all the running composite jobs if they have something new to schedule.
-    for (auto runningJob : qAsConst(_runningJobs)) {
+    for (auto runningJob : std::as_const(_runningJobs)) {
         ASSERT(runningJob->_state == Running);
 
         if (possiblyRunNextJob(runningJob)) {
@@ -905,8 +1295,21 @@ bool PropagatorCompositeJob::scheduleSelfOrChild()
 
 void PropagatorCompositeJob::slotSubJobFinished(SyncFileItem::Status status)
 {
-    auto *subJob = static_cast<PropagatorJob *>(sender());
+    auto *subJob = dynamic_cast<PropagatorJob *>(sender());
     ASSERT(subJob);
+
+    if (!_isAnyInvalidCharChild || !_isAnyCaseClashChild) {
+        SyncFileItemPtr childDirItem;
+        if (const auto propagateDirectoryjob = qobject_cast<PropagateDirectory *>(subJob)) {
+            childDirItem = propagateDirectoryjob->_item;
+        } else if (const auto propagateIgnoreJob = qobject_cast<PropagateIgnoreJob *>(subJob)) {
+            childDirItem = propagateIgnoreJob->_item;
+        }
+        if (childDirItem) {
+            _isAnyCaseClashChild = _isAnyCaseClashChild || childDirItem->_status == SyncFileItem::FileNameClash || childDirItem->_isAnyCaseClashChild;
+            _isAnyInvalidCharChild = _isAnyInvalidCharChild || childDirItem->_status == SyncFileItem::FileNameInvalid || childDirItem->_isAnyInvalidCharChild;  
+        }
+    }
 
     // Delete the job and remove it from our list of jobs.
     subJob->deleteLater();
@@ -960,13 +1363,13 @@ PropagateDirectory::PropagateDirectory(OwncloudPropagator *propagator, const Syn
     , _subJobs(propagator)
 {
     if (_firstJob) {
-        connect(_firstJob.data(), &PropagatorJob::finished, this, &PropagateDirectory::slotFirstJobFinished);
+        connect(_firstJob.get(), &PropagatorJob::finished, this, &PropagateDirectory::slotFirstJobFinished);
         _firstJob->setAssociatedComposite(&_subJobs);
     }
     connect(&_subJobs, &PropagatorJob::finished, this, &PropagateDirectory::slotSubJobsFinished);
 }
 
-PropagatorJob::JobParallelism PropagateDirectory::parallelism()
+PropagatorJob::JobParallelism PropagateDirectory::parallelism() const
 {
     // If any of the non-finished sub jobs is not parallel, we have to wait
     if (_firstJob && _firstJob->parallelism() != FullParallelism) {
@@ -1003,7 +1406,7 @@ bool PropagateDirectory::scheduleSelfOrChild()
 
 void PropagateDirectory::slotFirstJobFinished(SyncFileItem::Status status)
 {
-    _firstJob.take()->deleteLater();
+    _firstJob.release()->deleteLater();
 
     if (status != SyncFileItem::Success
         && status != SyncFileItem::Restoration
@@ -1012,6 +1415,7 @@ void PropagateDirectory::slotFirstJobFinished(SyncFileItem::Status status)
             // Synchronously abort
             abort(AbortType::Synchronous);
             _state = Finished;
+            qCInfo(lcPropagator) << "PropagateDirectory::slotFirstJobFinished" << "emit finished" << status;
             emit finished(status);
         }
         return;
@@ -1023,16 +1427,34 @@ void PropagateDirectory::slotFirstJobFinished(SyncFileItem::Status status)
 void PropagateDirectory::slotSubJobsFinished(SyncFileItem::Status status)
 {
     if (!_item->isEmpty() && status == SyncFileItem::Success) {
+        _item->_isAnyCaseClashChild = _item->_isAnyCaseClashChild || _subJobs._isAnyCaseClashChild;
+        _item->_isAnyInvalidCharChild = _item->_isAnyInvalidCharChild || _subJobs._isAnyInvalidCharChild;
         // If a directory is renamed, recursively delete any stale items
         // that may still exist below the old path.
-        if (_item->_instruction == CSYNC_INSTRUCTION_RENAME
-            && _item->_originalFile != _item->_renameTarget) {
-            propagator()->_journal->deleteFileRecord(_item->_originalFile, true);
+        if (_item->_instruction == CSYNC_INSTRUCTION_RENAME && _item->_originalFile != _item->_renameTarget) {
+            if (!propagator()->_journal->deleteFileRecord(_item->_originalFile, true)) {
+                qCWarning(lcDirectory) << "could not delete file from local DB" << _item->_originalFile;
+                _state = Finished;
+                status = _item->_status = SyncFileItem::FatalError;
+                _item->_errorString = tr("Could not delete file %1 from local DB").arg(_item->_originalFile);
+                qCInfo(lcPropagator) << "PropagateDirectory::slotSubJobsFinished"
+                                     << "emit finished" << status;
+                emit finished(status);
+                return;
+            }
         }
 
         if (_item->_instruction == CSYNC_INSTRUCTION_NEW && _item->_direction == SyncFileItem::Down) {
             // special case for local MKDIR, set local directory mtime
             // (it's not synced later at all, but can be nice to have it set initially)
+
+            if (_item->_modtime <= 0) {
+                status = _item->_status = SyncFileItem::NormalError;
+                _item->_errorString = tr("Error updating metadata due to invalid modification time");
+                qCWarning(lcDirectory) << "Error writing to the database for file" << _item->_file;
+            }
+
+            qCDebug(lcPropagator()) << "setModTime" << propagator()->fullLocalPath(_item->destination()) << _item->_modtime;
             FileSystem::setModTime(propagator()->fullLocalPath(_item->destination()), _item->_modtime);
         }
 
@@ -1042,14 +1464,86 @@ void PropagateDirectory::slotSubJobsFinished(SyncFileItem::Status status)
         if (_item->_instruction == CSYNC_INSTRUCTION_RENAME
             || _item->_instruction == CSYNC_INSTRUCTION_NEW
             || _item->_instruction == CSYNC_INSTRUCTION_UPDATE_METADATA) {
-            const auto result = propagator()->updateMetadata(*_item);
-            if (!result) {
-                status = _item->_status = SyncFileItem::FatalError;
-                _item->_errorString = tr("Error updating metadata: %1").arg(result.error());
-                qCWarning(lcDirectory) << "Error writing to the database for file" << _item->_file << "with" << result.error();
-            } else if (*result == Vfs::ConvertToPlaceholderResult::Locked) {
-                _item->_status = SyncFileItem::SoftError;
-                _item->_errorString = tr("File is currently in use");
+
+#if !defined(Q_OS_MACOS) || __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_15
+            if (!_item->_remotePerm.isNull() &&
+                !_item->_remotePerm.hasPermission(RemotePermissions::CanAddFile) &&
+                !_item->_remotePerm.hasPermission(RemotePermissions::CanAddSubDirectories)) {
+                try {
+                    if (FileSystem::fileExists(propagator()->fullLocalPath(_item->_file))) {
+                        FileSystem::setFolderPermissions(propagator()->fullLocalPath(_item->_file), FileSystem::FolderPermissions::ReadOnly);
+                    }
+                    if (!_item->_renameTarget.isEmpty() && FileSystem::fileExists(propagator()->fullLocalPath(_item->_renameTarget))) {
+                        FileSystem::setFolderPermissions(propagator()->fullLocalPath(_item->_renameTarget), FileSystem::FolderPermissions::ReadOnly);
+                    }
+                }
+                catch (const std::filesystem::filesystem_error &e)
+                {
+                    qCWarning(lcDirectory) << "exception when checking parent folder access rights" << e.what() << e.path1().c_str() << e.path2().c_str();
+                    _item->_status = SyncFileItem::NormalError;
+                    _item->_errorString = tr("The folder %1 cannot be made read-only: %2").arg(_item->_file, e.what());
+                }
+                catch (const std::system_error &e)
+                {
+                    qCWarning(lcDirectory) << "exception when checking parent folder access rights" << e.what();
+                    _item->_status = SyncFileItem::NormalError;
+                    _item->_errorString = tr("The folder %1 cannot be made read-only: %2").arg(_item->_file, e.what());
+                }
+                catch (...)
+                {
+                    qCWarning(lcDirectory) << "exception when checking parent folder access rights";
+                    _item->_status = SyncFileItem::NormalError;
+                    _item->_errorString = tr("The folder %1 cannot be made read-only: %2").arg(_item->_file, tr("unknown exception"));
+                }
+            } else {
+                try {
+                    const auto permissionsChangeHelper = [] (const auto fileName)
+                    {
+                        qCDebug(lcDirectory) << fileName << "permissions changed: old permissions" << static_cast<int>(std::filesystem::status(fileName.toStdWString()).permissions());
+                        FileSystem::setFolderPermissions(fileName, FileSystem::FolderPermissions::ReadWrite);
+                        qCDebug(lcDirectory) << fileName << "applied new permissions" << static_cast<int>(std::filesystem::status(fileName.toStdWString()).permissions());
+                    };
+
+                    if (const auto fileName = propagator()->fullLocalPath(_item->_file); FileSystem::fileExists(fileName)) {
+                        permissionsChangeHelper(fileName);
+                    }
+                    if (const auto fileName = propagator()->fullLocalPath(_item->_renameTarget); !_item->_renameTarget.isEmpty() && FileSystem::fileExists(fileName)) {
+                        permissionsChangeHelper(fileName);
+                    }
+                }
+                catch (const std::filesystem::filesystem_error &e)
+                {
+                    qCWarning(lcDirectory) << "exception when checking parent folder access rights" << e.what() << e.path1().c_str() << e.path2().c_str();
+                    _item->_status = SyncFileItem::NormalError;
+                    _item->_errorString = tr("The folder %1 cannot be made read-only: %2").arg(e.path1().c_str(), e.what());
+                }
+                catch (const std::system_error &e)
+                {
+                    qCWarning(lcDirectory) << "exception when checking parent folder access rights" << e.what();
+                    _item->_status = SyncFileItem::NormalError;
+                    _item->_errorString = tr("The folder %1 cannot be made read-only: %2").arg("", e.what());
+                }
+                catch (...)
+                {
+                    qCWarning(lcDirectory) << "exception when checking parent folder access rights";
+                    _item->_status = SyncFileItem::NormalError;
+                    _item->_errorString = tr("The folder %1 cannot be made read-only: %2").arg("", tr("unknown exception"));
+                }
+            }
+#endif
+            if (!_item->_isAnyCaseClashChild && !_item->_isAnyInvalidCharChild) {
+                if (_item->isEncrypted()) {
+                    _item->_e2eCertificateFingerprint = propagator()->account()->encryptionCertificateFingerprint();
+                }
+                const auto result = propagator()->updateMetadata(*_item);
+                if (!result) {
+                    status = _item->_status = SyncFileItem::FatalError;
+                    _item->_errorString = tr("Error updating metadata: %1").arg(result.error());
+                    qCWarning(lcDirectory) << "Error writing to the database for file" << _item->_file << "with" << result.error();
+                } else if (*result == Vfs::ConvertToPlaceholderResult::Locked) {
+                    _item->_status = SyncFileItem::SoftError;
+                    _item->_errorString = tr("File is currently in use");
+                }
             }
         }
     }
@@ -1064,7 +1558,7 @@ PropagateRootDirectory::PropagateRootDirectory(OwncloudPropagator *propagator)
     connect(&_dirDeletionJobs, &PropagatorJob::finished, this, &PropagateRootDirectory::slotDirDeletionJobsFinished);
 }
 
-PropagatorJob::JobParallelism PropagateRootDirectory::parallelism()
+PropagatorJob::JobParallelism PropagateRootDirectory::parallelism() const
 {
     // the root directory parallelism isn't important
     return WaitForFinished;
@@ -1104,25 +1598,44 @@ qint64 PropagateRootDirectory::committedDiskSpace() const
     return _subJobs.committedDiskSpace() + _dirDeletionJobs.committedDiskSpace();
 }
 
+void PropagateRootDirectory::appendDirDeletionJob(PropagatorJob *job)
+{
+    _dirDeletionJobs.appendJob(job);
+}
+
 bool PropagateRootDirectory::scheduleSelfOrChild()
 {
-    if (_state == Finished)
+    if (_state == Finished) {
         return false;
+    }
 
-    if (PropagateDirectory::scheduleSelfOrChild())
+    if (PropagateDirectory::scheduleSelfOrChild() && propagator()->delayedTasks().empty()) {
         return true;
+    }
 
     // Important: Finish _subJobs before scheduling any deletes.
-    if (_subJobs._state != Finished)
+    if (_subJobs._state != Finished) {
         return false;
+    }
+
+    if (!propagator()->delayedTasks().empty()) {
+        return scheduleDelayedJobs();
+    }
 
     return _dirDeletionJobs.scheduleSelfOrChild();
 }
 
 void PropagateRootDirectory::slotSubJobsFinished(SyncFileItem::Status status)
 {
+    if (!propagator()->delayedTasks().empty()) {
+        scheduleDelayedJobs();
+        return;
+    }
+
     if (status != SyncFileItem::Success
         && status != SyncFileItem::Restoration
+        && status != SyncFileItem::BlacklistedError
+        && status != SyncFileItem::FileNameClash
         && status != SyncFileItem::Conflict) {
         if (_state != Finished) {
             // Synchronously abort
@@ -1133,13 +1646,49 @@ void PropagateRootDirectory::slotSubJobsFinished(SyncFileItem::Status status)
         return;
     }
 
+    if (_errorStatus == SyncFileItem::NoStatus) {
+        switch (status) {
+        case SyncFileItem::NoStatus:
+        case SyncFileItem::FatalError:
+        case SyncFileItem::NormalError:
+        case SyncFileItem::SoftError:
+        case SyncFileItem::Conflict:
+        case SyncFileItem::FileIgnored:
+        case SyncFileItem::FileLocked:
+        case SyncFileItem::Restoration:
+        case SyncFileItem::FileNameInvalid:
+        case SyncFileItem::FileNameInvalidOnServer:
+        case SyncFileItem::DetailError:
+        case SyncFileItem::Success:
+            break;
+        case SyncFileItem::FileNameClash:
+        case SyncFileItem::BlacklistedError:
+            _errorStatus = status;
+            break;
+        }
+    }
+
     propagator()->scheduleNextJob();
 }
 
 void PropagateRootDirectory::slotDirDeletionJobsFinished(SyncFileItem::Status status)
 {
+    if (_errorStatus != SyncFileItem::NoStatus && status == SyncFileItem::Success) {
+        status = _errorStatus;
+    }
+
     _state = Finished;
     emit finished(status);
+}
+
+bool PropagateRootDirectory::scheduleDelayedJobs()
+{
+    propagator()->setScheduleDelayedTasks(true);
+    auto bulkPropagatorJob = std::make_unique<BulkPropagatorJob>(propagator(), propagator()->delayedTasks());
+    propagator()->clearDelayedTasks();
+    _subJobs.appendJob(bulkPropagatorJob.release());
+    _subJobs._state = Running;
+    return _subJobs.scheduleSelfOrChild();
 }
 
 // ================================================================================
@@ -1170,17 +1719,17 @@ void CleanupPollsJob::slotPollFinished()
     auto *job = qobject_cast<PollJob *>(sender());
     ASSERT(job);
     if (job->_item->_status == SyncFileItem::FatalError) {
-        emit aborted(job->_item->_errorString);
+        emit aborted(job->_item->_errorString, ErrorCategory::GenericError);
         deleteLater();
         return;
     } else if (job->_item->_status != SyncFileItem::Success) {
         qCWarning(lcCleanupPolls) << "There was an error with file " << job->_item->_file << job->_item->_errorString;
     } else {
-        if (!OwncloudPropagator::staticUpdateMetadata(*job->_item, _localPath, _vfs.data(), _journal)) {
+        if (!OwncloudPropagator::staticUpdateMetadata(*job->_item, _localPath, _vfs.data(), _journal, Vfs::AllMetadata)) {
             qCWarning(lcCleanupPolls) << "database error";
             job->_item->_status = SyncFileItem::FatalError;
             job->_item->_errorString = tr("Error writing metadata to the database");
-            emit aborted(job->_item->_errorString);
+            emit aborted(job->_item->_errorString, ErrorCategory::GenericError);
             deleteLater();
             return;
         }
@@ -1196,8 +1745,48 @@ QString OwncloudPropagator::fullRemotePath(const QString &tmp_file_name) const
     return _remoteFolder + tmp_file_name;
 }
 
+QString OwncloudPropagator::fulllRemotePathToPathInSyncJournalDb(const QString &fullRemotePath) const
+{
+    auto result = _remoteFolder != QStringLiteral("/") ? fullRemotePath.mid(_remoteFolder.size()) : fullRemotePath;
+    if (result.startsWith("/")) {
+        result = result.mid(1);
+    }
+    return result;
+}
+
 QString OwncloudPropagator::remotePath() const
 {
     return _remoteFolder;
 }
+
+void PropagateIgnoreJob::start()
+{
+    auto status = _item->_status;
+    if (status == SyncFileItem::NoStatus) {
+        if (_item->_instruction == CSYNC_INSTRUCTION_ERROR) {
+            status = SyncFileItem::NormalError;
+        } else {
+            status = SyncFileItem::FileIgnored;
+            ASSERT(_item->_instruction == CSYNC_INSTRUCTION_IGNORE);
+        }
+    } else if (status == SyncFileItem::FileNameClash) {
+        const auto conflictRecord = propagator()->_journal->caseConflictRecordByPath(_item->_file);
+        if (conflictRecord.isValid()) {
+            _item->_file = conflictRecord.initialBasePath;
+        }
+    }
+    done(status, _item->_errorString, ErrorCategory::NoError);
+}
+
+void PropagateVfsUpdateMetadataJob::start()
+{
+    const auto fullFileName = propagator()->fullLocalPath(_item->_file);
+    const auto result = propagator()->syncOptions()._vfs->updatePlaceholderMarkInSync(fullFileName, _item->_fileId);
+    emit propagator()->touchedFile(fullFileName);
+    if (!result) {
+        qCWarning(lcPropagator()) << "error when updating VFS metadata" << result.error();
+    }
+    done(SyncFileItem::Success, {}, {});
+}
+
 }

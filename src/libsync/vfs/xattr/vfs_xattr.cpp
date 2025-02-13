@@ -14,13 +14,15 @@
 
 #include "vfs_xattr.h"
 
-#include <QFile>
-
 #include "syncfileitem.h"
 #include "filesystem.h"
 #include "common/syncjournaldb.h"
-
 #include "xattrwrapper.h"
+
+#include <QFile>
+#include <QLoggingCategory>
+
+Q_LOGGING_CATEGORY(lcVfsXAttr, "nextcloud.sync.vfs.xattr", QtInfoMsg)
 
 namespace xattr {
 using namespace OCC::XAttrWrapper;
@@ -69,12 +71,21 @@ bool VfsXAttr::isHydrating() const
 
 Result<void, QString> VfsXAttr::updateMetadata(const QString &filePath, time_t modtime, qint64, const QByteArray &)
 {
+    if (modtime <= 0) {
+        return {tr("Error updating metadata due to invalid modification time")};
+    }
+
+    qCDebug(lcVfsXAttr()) << "setModTime" << filePath << modtime;
     FileSystem::setModTime(filePath, modtime);
     return {};
 }
 
 Result<void, QString> VfsXAttr::createPlaceholder(const SyncFileItem &item)
 {
+    if (item._modtime <= 0) {
+        return {tr("Error updating metadata due to invalid modification time")};
+    }
+
     const auto path = QString(_setupParams.filesystemPath + item._file);
     QFile file(path);
     if (file.exists() && file.size() > 1
@@ -88,6 +99,7 @@ Result<void, QString> VfsXAttr::createPlaceholder(const SyncFileItem &item)
 
     file.write(" ");
     file.close();
+    qCDebug(lcVfsXAttr()) << "setModTime" << path << item._modtime;
     FileSystem::setModTime(path, item._modtime);
     return xattr::addNextcloudPlaceholderAttributes(path);
 }
@@ -112,7 +124,10 @@ Result<void, QString> VfsXAttr::dehydratePlaceholder(const SyncFileItem &item)
     return {};
 }
 
-Result<Vfs::ConvertToPlaceholderResult, QString> VfsXAttr::convertToPlaceholder(const QString &, const SyncFileItem &, const QString &)
+Result<Vfs::ConvertToPlaceholderResult, QString> VfsXAttr::convertToPlaceholder(const QString &,
+                                                                                const SyncFileItem &,
+                                                                                const QString &,
+                                                                                UpdateMetadataTypes)
 {
     // Nothing necessary
     return {ConvertToPlaceholderResult::Ok};
@@ -164,6 +179,7 @@ bool VfsXAttr::statTypeVirtualFile(csync_file_stat_t *stat, void *statData)
 
 bool VfsXAttr::setPinState(const QString &folderPath, PinState state)
 {
+    qCDebug(lcVfsXAttr) << "setPinState" << folderPath << state;
     return setPinStateInDb(folderPath, state);
 }
 
@@ -172,8 +188,9 @@ Optional<PinState> VfsXAttr::pinState(const QString &folderPath)
     return pinStateInDb(folderPath);
 }
 
-Vfs::AvailabilityResult VfsXAttr::availability(const QString &folderPath)
+Vfs::AvailabilityResult VfsXAttr::availability(const QString &folderPath, const AvailabilityRecursivity recursiveCheck)
 {
+    Q_UNUSED(recursiveCheck)
     return availabilityInDb(folderPath);
 }
 

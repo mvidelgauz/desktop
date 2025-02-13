@@ -37,7 +37,7 @@
 #include <QLibrary>
 #include <qt_windows.h>
 using PProcessIdToSessionId = BOOL (WINAPI*)(DWORD, DWORD*);
-static PProcessIdToSessionId pProcessIdToSessionId = 0;
+static PProcessIdToSessionId pProcessIdToSessionId = nullptr;
 #endif
 
 #if defined(Q_OS_UNIX)
@@ -51,8 +51,8 @@ static const char ack[] = "ack";
 
 QString QtLocalPeer::appSessionId(const QString &appId)
 {
-    QByteArray idc = appId.toUtf8();
-    quint16 idNum = qChecksum(idc.constData(), idc.size());
+    const auto idc = appId.toUtf8();
+    const auto idNum = qChecksum(idc);
     //### could do: two 16bit checksums over separate halves of id, for a 32bit result - improved uniqeness probability. Every-other-char split would be best.
 
     QString res = QLatin1String("qtsingleapplication-")

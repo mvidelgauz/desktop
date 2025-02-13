@@ -16,15 +16,18 @@
 #ifndef ACCOUNTINFO_H
 #define ACCOUNTINFO_H
 
+#include "connectionvalidator.h"
+#include "creds/abstractcredentials.h"
+
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QPointer>
-#include "connectionvalidator.h"
-#include "creds/abstractcredentials.h"
+#include <QTimer>
 
 #include <memory>
 
 class QSettings;
+class FakeAccountState;
 
 namespace OCC {
 
@@ -44,6 +47,7 @@ class AccountState : public QObject, public QSharedData
 {
     Q_OBJECT
     Q_PROPERTY(AccountPtr account MEMBER _account)
+    Q_PROPERTY(State state READ state NOTIFY stateChanged)
 
 public:
     enum State {
@@ -61,6 +65,10 @@ public:
         /// don't bother the user too much and try again.
         ServiceUnavailable,
 
+        /// Connection is being redirected (likely a captive portal is in effect)
+        /// Do not proceed with connecting and check back later
+        RedirectDetected,
+
         /// Similar to ServiceUnavailable, but we know the server is down
         /// for maintenance
         MaintenanceMode,
@@ -74,27 +82,18 @@ public:
         ConfigurationError,
 
         /// We are currently asking the user for credentials
-        AskingCredentials
+        AskingCredentials,
+
+        /// Need to sign terms of service by going to web UI
+        NeedToSignTermsOfService,
     };
 
     /// The actual current connectivity status.
     using ConnectionStatus = ConnectionValidator::Status;
 
     /// Use the account as parent
-    explicit AccountState(AccountPtr account);
+    explicit AccountState(const AccountPtr &account);
     ~AccountState() override;
-
-    /** Creates an account state from settings and an Account object.
-     *
-     * Use from AccountManager with a prepared QSettings object only.
-     */
-    static AccountState *loadFromSettings(AccountPtr account, QSettings &settings);
-
-    /** Writes account state information to settings.
-     *
-     * It does not write the Account data.
-     */
-    void writeToSettings(QSettings &settings);
 
     AccountPtr account() const;
 
@@ -162,53 +161,73 @@ public:
     ///Asks for user credentials
     void handleInvalidCredentials();
 
-    /** Returns the notifications status retrieved by the notificatons endpoint
+    /** Returns the notifications status retrieved by the notifications endpoint
      *  https://github.com/nextcloud/desktop/issues/2318#issuecomment-680698429
     */
     bool isDesktopNotificationsAllowed() const;
 
-    /** Set desktop notifications status retrieved by the notificatons endpoint
+    /** Set desktop notifications status retrieved by the notifications endpoint
     */
     void setDesktopNotificationsAllowed(bool isAllowed);
+
+    ConnectionStatus lastConnectionStatus() const;
+    
+    void trySignIn();
+
+    void systemOnlineConfigurationChanged();
 
 public slots:
     /// Triggers a ping to the server to update state and
     /// connection status and errors.
-    void checkConnectivity();
+    virtual void checkConnectivity();
 
 private:
-    void setState(State state);
+    virtual void setState(State state);
     void fetchNavigationApps();
 
+    int retryCount() const;
+    void increaseRetryCount();
+    void resetRetryCount();
+
 signals:
-    void stateChanged(State state);
+    void stateChanged(OCC::AccountState::State state);
     void isConnectedChanged();
     void hasFetchedNavigationApps();
     void statusChanged();
     void desktopNotificationsAllowedChanged();
+    void termsOfServiceChanged(OCC::AccountPtr account, AccountState::State state);
 
 protected Q_SLOTS:
-    void slotConnectionValidatorResult(ConnectionValidator::Status status, const QStringList &errors);
+    void slotConnectionValidatorResult(OCC::ConnectionValidator::Status status, const QStringList &errors);
 
     /// When client gets a 401 or 403 checks if server requested remote wipe
     /// before asking for user credentials again
     void slotHandleRemoteWipeCheck();
 
-    void slotCredentialsFetched(AbstractCredentials *creds);
-    void slotCredentialsAsked(AbstractCredentials *creds);
+    void slotCredentialsFetched(OCC::AbstractCredentials *creds);
+    void slotCredentialsAsked(OCC::AbstractCredentials *creds);
 
     void slotNavigationAppsFetched(const QJsonDocument &reply, int statusCode);
     void slotEtagResponseHeaderReceived(const QByteArray &value, int statusCode);
     void slotOcsError(int statusCode, const QString &message);
 
+private Q_SLOTS:
+
+    void slotCheckConnection();
+    void slotCheckServerAvailibility();
+    void slotPushNotificationsReady();
+    void slotServerUserStatusChanged();
+
 private:
     AccountPtr _account;
     State _state;
     ConnectionStatus _connectionStatus;
+    ConnectionStatus _lastConnectionValidatorStatus = ConnectionStatus::Undefined;
     QStringList _connectionErrors;
-    bool _waitingForNewCredentials;
+    bool _waitingForNewCredentials = false;
     QDateTime _timeOfLastETagCheck;
     QPointer<ConnectionValidator> _connectionValidator;
+    TermsOfServiceChecker _termsOfServiceChecker;
     QByteArray _notificationsEtagResponseHeader;
     QByteArray _navigationAppsEtagResponseHeader;
 
@@ -222,20 +241,31 @@ private:
     /**
      * Milliseconds for which to delay reconnection after 503/maintenance.
      */
-    int _maintenanceToConnectedDelay;
+    int _maintenanceToConnectedDelay = 0;
 
     /**
      * Connects remote wipe check with the account
      * the log out triggers the check (loads app password -> create request)
      */
-    RemoteWipe *_remoteWipe;
+    RemoteWipe *_remoteWipe = nullptr;
 
     /**
      * Holds the App names and URLs available on the server
      */
     AccountAppList _apps;
 
-    bool _isDesktopNotificationsAllowed;
+    bool _isDesktopNotificationsAllowed = false;
+
+    int _retryCount = 0;
+
+    QTimer _checkConnectionTimer;
+    QElapsedTimer _lastCheckConnectionTimer;
+
+    QTimer _checkServerAvailibilityTimer;
+
+    explicit AccountState() = default;
+
+    friend class ::FakeAccountState;
 };
 
 class AccountApp : public QObject
@@ -246,10 +276,10 @@ public:
         const QString &id, const QUrl &iconUrl,
         QObject* parent = nullptr);
 
-    QString name() const;
-    QUrl url() const;
-    QString id() const;
-    QUrl iconUrl() const;
+    [[nodiscard]] QString name() const;
+    [[nodiscard]] QUrl url() const;
+    [[nodiscard]] QString id() const;
+    [[nodiscard]] QUrl iconUrl() const;
 
 private:
     QString _name;

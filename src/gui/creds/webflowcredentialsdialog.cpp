@@ -1,41 +1,41 @@
 #include "webflowcredentialsdialog.h"
 
-#include <QVBoxLayout>
-#include <QLabel>
+#include "config.h"
 
 #include "theme.h"
 #include "application.h"
 #include "owncloudgui.h"
-#include "headerbanner.h"
 #include "wizard/owncloudwizardcommon.h"
+
 #ifdef WITH_WEBENGINE
 #include "wizard/webview.h"
 #endif // WITH_WEBENGINE
+
 #include "wizard/flow2authwidget.h"
+
+#include <QVBoxLayout>
+#include <QLabel>
 
 namespace OCC {
 
 WebFlowCredentialsDialog::WebFlowCredentialsDialog(Account *account, bool useFlow2, QWidget *parent)
     : QDialog(parent)
     , _useFlow2(useFlow2)
-    , _flow2AuthWidget(nullptr)
-#ifdef WITH_WEBENGINE
-    , _webView(nullptr)
-#endif // WITH_WEBENGINE
 {
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
     _layout = new QVBoxLayout(this);
     int spacing = _layout->spacing();
-    int margin = _layout->margin();
+    auto margin = _layout->contentsMargins();
     _layout->setSpacing(0);
-    _layout->setMargin(0);
+    _layout->setContentsMargins(0, 0, 0, 0);
 
     _containerLayout = new QVBoxLayout(this);
     _containerLayout->setSpacing(spacing);
-    _containerLayout->setMargin(margin);
+    _containerLayout->setContentsMargins(margin);
 
     _infoLabel = new QLabel();
+    _infoLabel->setTextFormat(Qt::PlainText);
     _infoLabel->setAlignment(Qt::AlignCenter);
     _containerLayout->addWidget(_infoLabel);
 
@@ -55,16 +55,17 @@ WebFlowCredentialsDialog::WebFlowCredentialsDialog(Account *account, bool useFlo
     } else {
 #ifdef WITH_WEBENGINE
         _webView = new WebView();
-        _containerLayout->addWidget(_webView);
+        _containerLayout->addWidget(_webView, 1);
 
         connect(_webView, &WebView::urlCatched, this, &WebFlowCredentialsDialog::urlCatched);
 #endif // WITH_WEBENGINE
     }
 
-    auto app = static_cast<Application *>(qApp);
+    auto app = dynamic_cast<Application *>(qApp);
     connect(app, &Application::isShowingSettingsDialog, this, &WebFlowCredentialsDialog::slotShowSettingsDialog);
 
     _errorLabel = new QLabel();
+    _errorLabel->setTextFormat(Qt::PlainText);
     _errorLabel->hide();
     _containerLayout->addWidget(_errorLabel);
 

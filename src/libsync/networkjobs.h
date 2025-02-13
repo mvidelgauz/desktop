@@ -16,22 +16,28 @@
 #ifndef NETWORKJOBS_H
 #define NETWORKJOBS_H
 
+#include "config.h"
+
 #include "abstractnetworkjob.h"
 
 #include "common/result.h"
 
 #include <QBuffer>
 #include <QUrlQuery>
-#include <QJsonDocument>
-#include <functional>
 
 class QUrl;
 class QJsonObject;
+class QJsonDocument;
+class QDomDocument;
 
 namespace OCC {
 
-/** Strips quotes and gzip annotations */
-OWNCLOUDSYNC_EXPORT QByteArray parseEtag(const char *header);
+constexpr auto HttpErrorCodeNone = 0;
+constexpr auto HttpErrorCodeSuccess = 200;
+constexpr auto HttpErrorCodeSuccessCreated = 201;
+constexpr auto HttpErrorCodeSuccessNoContent = 204;
+constexpr auto HttpErrorCodeBadRequest = 400;
+constexpr auto HttpErrorCodeUnsupportedMediaType = 415;
 
 struct HttpError
 {
@@ -61,13 +67,38 @@ private slots:
 };
 
 /**
+ * @brief A basic file manipulation job
+ * @ingroup libsync
+ */
+class OWNCLOUDSYNC_EXPORT SimpleFileJob : public AbstractNetworkJob
+{
+    Q_OBJECT
+public:
+    explicit SimpleFileJob(AccountPtr account, const QString &filePath, QObject *parent = nullptr);
+
+    QNetworkReply *startRequest(
+        const QByteArray &verb, const QNetworkRequest req = QNetworkRequest(), QIODevice *requestBody = nullptr);
+
+    QNetworkReply *startRequest(const QByteArray &verb, const QUrl &url, const QNetworkRequest req = QNetworkRequest(),
+        QIODevice *requestBody = nullptr);
+
+signals:
+    void finishedSignal(QNetworkReply *reply);
+protected slots:
+    bool finished() override;
+
+private:
+    QByteArray _verb;
+};
+
+/**
  * @brief sends a DELETE http request to a url.
  *
  * See Nextcloud API usage for the possible DELETE requests.
  *
  * This does *not* delete files, it does a http request.
  */
-class OWNCLOUDSYNC_EXPORT DeleteApiJob : public AbstractNetworkJob
+class OWNCLOUDSYNC_EXPORT DeleteApiJob : public SimpleFileJob
 {
     Q_OBJECT
 public:
@@ -111,8 +142,8 @@ class OWNCLOUDSYNC_EXPORT LsColJob : public AbstractNetworkJob
 {
     Q_OBJECT
 public:
-    explicit LsColJob(AccountPtr account, const QString &path, QObject *parent = nullptr);
-    explicit LsColJob(AccountPtr account, const QUrl &url, QObject *parent = nullptr);
+    explicit LsColJob(AccountPtr account, const QString &path);
+    explicit LsColJob(AccountPtr account, const QUrl &url);
     void start() override;
     QHash<QString, ExtraFolderInfo> _folderInfos;
 
@@ -125,7 +156,7 @@ public:
      *    e.g. "ns:with:colons:bar", which is "bar" in the "ns:with:colons" namespace
      */
     void setProperties(QList<QByteArray> properties);
-    QList<QByteArray> properties() const;
+    [[nodiscard]] QList<QByteArray> properties() const;
 
 signals:
     void directoryListingSubfolders(const QStringList &items);
@@ -167,7 +198,7 @@ public:
      *    e.g. "ns:with:colons:bar", which is "bar" in the "ns:with:colons" namespace
      */
     void setProperties(QList<QByteArray> properties);
-    QList<QByteArray> properties() const;
+    [[nodiscard]] QList<QByteArray> properties() const;
 
 signals:
     void result(const QVariantMap &values);
@@ -177,6 +208,10 @@ private slots:
     bool finished() override;
 
 private:
+    static QVariantMap processPropfindDomDocument(const QDomDocument &domDocument);
+    static QStringList processTagsInPropfindDomDocument(const QDomDocument &domDocument);
+    static QVariantList processSystemTagsInPropfindDomDocument(const QDomDocument &domDocument);
+
     QList<QByteArray> _properties;
 };
 
@@ -243,7 +278,7 @@ public:
      *    e.g. "ns:with:colons:bar", which is "bar" in the "ns:with:colons" namespace
      */
     void setProperties(QMap<QByteArray, QByteArray> properties);
-    QMap<QByteArray, QByteArray> properties() const;
+    [[nodiscard]] QMap<QByteArray, QByteArray> properties() const;
 
 signals:
     void success();
@@ -325,7 +360,7 @@ private slots:
     void slotRedirected(QNetworkReply *reply, const QUrl &targetUrl, int redirectCount);
 
 private:
-    bool _subdirFallback;
+    bool _subdirFallback = false;
 
     /** The permanent-redirect adjusted account url.
      *
@@ -335,7 +370,35 @@ private:
     QUrl _serverUrl;
 
     /** Keep track of how many permanent redirect were applied. */
-    int _permanentRedirects;
+    int _permanentRedirects = 0;
+};
+
+/**
+ * @brief The CheckRedirectCostFreeUrlJob class
+ * @ingroup libsync
+ */
+class OWNCLOUDSYNC_EXPORT CheckRedirectCostFreeUrlJob : public AbstractNetworkJob
+{
+    Q_OBJECT
+public:
+    explicit CheckRedirectCostFreeUrlJob(const AccountPtr &account, QObject *parent = nullptr);
+    void start() override;
+
+signals:
+    /**
+    * a check is finished
+    * \a statusCode cost-free URL GET HTTP response code
+    */
+    void jobFinished(int statusCode);
+    /** A timeout occurred.
+     *
+     * \a url The specific url where the timeout happened.
+     */
+    void timeout(const QUrl &url);
+
+private:
+    bool finished() override;
+    void onTimedOut() override;
 };
 
 
@@ -357,6 +420,58 @@ private slots:
     bool finished() override;
 };
 
+class OWNCLOUDSYNC_EXPORT SimpleApiJob : public AbstractNetworkJob
+{
+    Q_OBJECT
+public:
+    enum class Verb {
+        Get,
+        Post,
+        Put,
+        Delete,
+        };
+
+    explicit SimpleApiJob(const AccountPtr &account, const QString &path, QObject *parent = nullptr);
+
+    void setBody(const QByteArray &body);
+
+    void setVerb(Verb value);
+
+    /**
+     * @brief addQueryParams - add more parameters to the ocs call
+     * @param params: list pairs of strings containing the parameter name and the value.
+     *
+     * All parameters from the passed list are appended to the query. Note
+     * that the format=json parameter is added automatically and does not
+     * need to be set this way.
+     *
+     * This function needs to be called before start() obviously.
+     */
+    void addQueryParams(const QUrlQuery &params);
+    void addRawHeader(const QByteArray &headerName, const QByteArray &value);
+
+public slots:
+    void start() override;
+
+Q_SIGNALS:
+
+    void resultReceived(int statusCode);
+
+protected:
+    bool finished() override;
+
+    [[nodiscard]] QNetworkRequest& request();
+    [[nodiscard]] QByteArray& body();
+    [[nodiscard]] QUrlQuery& additionalParams();
+    [[nodiscard]] QByteArray verbToString() const;
+
+private:
+    QByteArray _body;
+    QUrlQuery _additionalParams;
+    QNetworkRequest _request;
+    Verb _verb = Verb::Get;
+};
+
 /**
  * @brief Job to check an API that return JSON
  *
@@ -372,35 +487,13 @@ private slots:
  *
  * @ingroup libsync
  */
-class OWNCLOUDSYNC_EXPORT JsonApiJob : public AbstractNetworkJob
+class OWNCLOUDSYNC_EXPORT JsonApiJob : public SimpleApiJob
 {
     Q_OBJECT
 public:
-    enum class Verb {
-        Get,
-        Post,
-        Put,
-        Delete,
-    };
-
     explicit JsonApiJob(const AccountPtr &account, const QString &path, QObject *parent = nullptr);
 
-    /**
-     * @brief addQueryParams - add more parameters to the ocs call
-     * @param params: list pairs of strings containing the parameter name and the value.
-     *
-     * All parameters from the passed list are appended to the query. Note
-     * that the format=json parameter is added automatically and does not
-     * need to be set this way.
-     *
-     * This function needs to be called before start() obviously.
-     */
-    void addQueryParams(const QUrlQuery &params);
-    void addRawHeader(const QByteArray &headerName, const QByteArray &value);
-
     void setBody(const QJsonDocument &body);
-
-    void setVerb(Verb value);
 
 public slots:
     void start() override;
@@ -423,21 +516,6 @@ signals:
      * @param statusCode - the OCS status code: 100 (!) for success
      */
     void etagResponseHeaderReceived(const QByteArray &value, int statusCode);
-
-    /**
-     * @brief desktopNotificationStatusReceived - signal to report if notifications are allowed
-     * @param status - set desktop notifications allowed status
-     */
-    void allowDesktopNotificationsChanged(bool isAllowed);
-
-private:
-    QByteArray _body;
-    QUrlQuery _additionalParams;
-    QNetworkRequest _request;
-
-    Verb _verb = Verb::Get;
-
-    QByteArray verbToString() const;
 };
 
 /**
@@ -454,7 +532,6 @@ public:
         WebViewFlow,
 #endif // WITH_WEBENGINE
         Basic, // also the catch-all fallback for backwards compatibility reasons
-        OAuth,
         LoginFlowV2
     };
     Q_ENUM(AuthType)
@@ -462,7 +539,7 @@ public:
     explicit DetermineAuthTypeJob(AccountPtr account, QObject *parent = nullptr);
     void start();
 signals:
-    void authType(AuthType);
+    void authType(OCC::DetermineAuthTypeJob::AuthType);
 
 private:
     void checkAllDone();
@@ -474,10 +551,11 @@ private:
     bool _getDone = false;
     bool _propfindDone = false;
     bool _oldFlowDone = false;
+    bool useFlow2 = false;
 };
 
 /**
- * @brief A basic job around a network request without extra funtionality
+ * @brief A basic job around a network request without extra functionality
  * @ingroup libsync
  *
  * Primarily adds timeout and redirection handling.

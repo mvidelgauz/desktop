@@ -30,29 +30,29 @@ class OWNCLOUDDOLPHINPLUGINHELPER_EXPORT OwncloudDolphinPluginHelper : public QO
 public:
     static OwncloudDolphinPluginHelper *instance();
 
-    bool isConnected() const;
+    [[nodiscard]] bool isConnected() const;
     void sendCommand(const char *data);
-    QVector<QString> paths() const { return _paths; }
+    [[nodiscard]] QVector<QString> paths() const { return _paths; }
 
-    QString contextMenuTitle() const
+    [[nodiscard]] QString contextMenuTitle() const
     {
-        return _strings.value("CONTEXT_MENU_TITLE", APPLICATION_NAME);
+        return _strings.value(QStringLiteral("CONTEXT_MENU_TITLE"), QStringLiteral(APPLICATION_NAME));
     }
-    QString shareActionTitle() const
+    [[nodiscard]] QString shareActionTitle() const
     {
-        return _strings.value("SHARE_MENU_TITLE", "Share …");
+        return _strings.value(QStringLiteral("SHARE_MENU_TITLE"), QStringLiteral("Share …"));
     }
-    QString contextMenuIconName() const
+    [[nodiscard]] QString contextMenuIconName() const
     {
-        return _strings.value("CONTEXT_MENU_ICON", APPLICATION_ICON_NAME);
+        return _strings.value(QStringLiteral("CONTEXT_MENU_ICON"), QStringLiteral(APPLICATION_ICON_NAME));
     }
 
-    QString copyPrivateLinkTitle() const { return _strings["COPY_PRIVATE_LINK_MENU_TITLE"]; }
-    QString emailPrivateLinkTitle() const { return _strings["EMAIL_PRIVATE_LINK_MENU_TITLE"]; }
+    [[nodiscard]] QString copyPrivateLinkTitle() const { return _strings[QStringLiteral("COPY_PRIVATE_LINK_MENU_TITLE")]; }
+    [[nodiscard]] QString emailPrivateLinkTitle() const { return _strings[QStringLiteral("EMAIL_PRIVATE_LINK_MENU_TITLE")]; }
 
     QByteArray version() { return _version; }
 
-signals:
+Q_SIGNALS:
     void commandRecieved(const QByteArray &cmd);
 
 protected:

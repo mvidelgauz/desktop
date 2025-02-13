@@ -13,16 +13,16 @@
  */
 #pragma once
 
+#include "ocsynclib.h"
+#include "result.h"
+#include "syncfilestatus.h"
+#include "pinstate.h"
+
 #include <QObject>
 #include <QScopedPointer>
 #include <QSharedPointer>
 
 #include <memory>
-
-#include "ocsynclib.h"
-#include "result.h"
-#include "syncfilestatus.h"
-#include "pinstate.h"
 
 using csync_file_stat_t = struct csync_file_stat_s;
 
@@ -48,6 +48,9 @@ struct OCSYNC_EXPORT VfsSetupParams
 
     // Folder alias
     QString alias;
+
+    // Folder registry navigation Pane CLSID
+    QString navigationPaneClsid;
 
     /** The path to the synced folder on the account
      *
@@ -110,10 +113,19 @@ public:
     };
     Q_ENUM(ConvertToPlaceholderResult)
 
+    enum UpdateMetadataType {
+        DatabaseMetadata = 1 << 0,
+        FileMetadata = 1 << 1,
+        AllMetadata = DatabaseMetadata | FileMetadata,
+    };
+
+    Q_DECLARE_FLAGS(UpdateMetadataTypes, UpdateMetadataType)
+    Q_FLAG(UpdateMetadataType)
+
     static QString modeToString(Mode mode);
     static Optional<Mode> modeFromString(const QString &str);
 
-    static Result<bool, QString> checkAvailability(const QString &path);
+    static Result<void, QString> checkAvailability(const QString &path, OCC::Vfs::Mode mode);
 
     enum class AvailabilityError
     {
@@ -122,19 +134,26 @@ public:
         // Availability not available since the item doesn't exist
         NoSuchItem,
     };
+    Q_ENUM(AvailabilityError)
     using AvailabilityResult = Result<VfsItemAvailability, AvailabilityError>;
+
+    enum class AvailabilityRecursivity {
+        RecursiveAvailability,
+        NotRecursiveAvailability,
+    };
+    Q_ENUM(AvailabilityRecursivity)
 
 public:
     explicit Vfs(QObject* parent = nullptr);
     ~Vfs() override;
 
-    virtual Mode mode() const = 0;
+    [[nodiscard]] virtual Mode mode() const = 0;
 
     /// For WithSuffix modes: the suffix (including the dot)
-    virtual QString fileSuffix() const = 0;
+    [[nodiscard]] virtual QString fileSuffix() const = 0;
 
     /// Access to the parameters the instance was start()ed with.
-    const VfsSetupParams &params() const { return _setupParams; }
+    [[nodiscard]] const VfsSetupParams &params() const { return _setupParams; }
 
 
     /** Initializes interaction with the VFS provider.
@@ -155,37 +174,41 @@ public:
      * Some plugins might provide alternate shell integration, making the normal
      * context menu actions redundant.
      */
-    virtual bool socketApiPinStateActionsShown() const = 0;
+    [[nodiscard]] virtual bool socketApiPinStateActionsShown() const = 0;
 
     /** Return true when download of a file's data is currently ongoing.
      *
      * See also the beginHydrating() and doneHydrating() signals.
      */
-    virtual bool isHydrating() const = 0;
+    [[nodiscard]] virtual bool isHydrating() const = 0;
 
     /** Update placeholder metadata during discovery.
      *
      * If the remote metadata changes, the local placeholder's metadata should possibly
      * change as well.
      */
-    virtual Q_REQUIRED_RESULT Result<void, QString> updateMetadata(const QString &filePath, time_t modtime, qint64 size, const QByteArray &fileId) = 0;
+    [[nodiscard]] virtual Result<void, QString> updateMetadata(const QString &filePath, time_t modtime, qint64 size, const QByteArray &fileId) = 0;
+
+    [[nodiscard]] virtual Result<Vfs::ConvertToPlaceholderResult, QString> updatePlaceholderMarkInSync(const QString &filePath, const QByteArray &fileId) = 0;
+
+    [[nodiscard]] virtual bool isPlaceHolderInSync(const QString &filePath) const = 0;
 
     /// Create a new dehydrated placeholder. Called from PropagateDownload.
-    virtual Q_REQUIRED_RESULT Result<void, QString> createPlaceholder(const SyncFileItem &item) = 0;
+    Q_REQUIRED_RESULT virtual Result<void, QString> createPlaceholder(const SyncFileItem &item) = 0;
 
     /** Convert a hydrated placeholder to a dehydrated one. Called from PropagateDownlaod.
      *
      * This is different from delete+create because preserving some file metadata
      * (like pin states) may be essential for some vfs plugins.
      */
-    virtual Q_REQUIRED_RESULT Result<void, QString> dehydratePlaceholder(const SyncFileItem &item) = 0;
+    Q_REQUIRED_RESULT virtual Result<void, QString> dehydratePlaceholder(const SyncFileItem &item) = 0;
 
     /** Discovery hook: even unchanged files may need UPDATE_METADATA.
      *
      * For instance cfapi vfs wants local hydrated non-placeholder files to
      * become hydrated placeholder files.
      */
-    virtual Q_REQUIRED_RESULT bool needsMetadataUpdate(const SyncFileItem &item) = 0;
+    Q_REQUIRED_RESULT virtual bool needsMetadataUpdate(const SyncFileItem &item) = 0;
 
     /** Convert a new file to a hydrated placeholder.
      *
@@ -200,13 +223,13 @@ public:
      * new placeholder shall supersede, for rename-replace actions with new downloads,
      * for example.
      */
-    virtual Q_REQUIRED_RESULT Result<Vfs::ConvertToPlaceholderResult, QString> convertToPlaceholder(
-        const QString &filename,
-        const SyncFileItem &item,
-        const QString &replacesFile = QString()) = 0;
+    Q_REQUIRED_RESULT virtual Result<Vfs::ConvertToPlaceholderResult, QString> convertToPlaceholder(const QString &filename,
+                                                                                                    const SyncFileItem &item,
+                                                                                                    const QString &replacesFile = {},
+                                                                                                    UpdateMetadataTypes updateType = AllMetadata) = 0;
 
     /// Determine whether the file at the given absolute path is a dehydrated placeholder.
-    virtual Q_REQUIRED_RESULT bool isDehydratedPlaceholder(const QString &filePath) = 0;
+    Q_REQUIRED_RESULT virtual bool isDehydratedPlaceholder(const QString &filePath) = 0;
 
     /** Similar to isDehydratedPlaceholder() but used from sync discovery.
      *
@@ -215,7 +238,7 @@ public:
      *
      * Returning true means that type was fully determined.
      */
-    virtual Q_REQUIRED_RESULT bool statTypeVirtualFile(csync_file_stat_t *stat, void *stat_data) = 0;
+    Q_REQUIRED_RESULT virtual bool statTypeVirtualFile(csync_file_stat_t *stat, void *stat_data) = 0;
 
     /** Sets the pin state for the item at a path.
      *
@@ -226,7 +249,7 @@ public:
      *
      * folderPath is relative to the sync folder. Can be "" for root folder.
      */
-    virtual Q_REQUIRED_RESULT bool setPinState(const QString &folderPath, PinState state) = 0;
+    Q_REQUIRED_RESULT virtual bool setPinState(const QString &folderPath, PinState state) = 0;
 
     /** Returns the pin state of an item at a path.
      *
@@ -237,7 +260,7 @@ public:
      *
      * Returns none on retrieval error.
      */
-    virtual Q_REQUIRED_RESULT Optional<PinState> pinState(const QString &folderPath) = 0;
+    Q_REQUIRED_RESULT virtual Optional<PinState> pinState(const QString &folderPath) = 0;
 
     /** Returns availability status of an item at a path.
      *
@@ -246,7 +269,7 @@ public:
      *
      * folderPath is relative to the sync folder. Can be "" for root folder.
      */
-    virtual Q_REQUIRED_RESULT AvailabilityResult availability(const QString &folderPath) = 0;
+    Q_REQUIRED_RESULT virtual AvailabilityResult availability(const QString &folderPath, const AvailabilityRecursivity recursiveCheck) = 0;
 
 public slots:
     /** Update in-sync state based on SyncFileStatusTracker signal.
@@ -255,13 +278,15 @@ public slots:
      * via the vfs plugin. The connection to SyncFileStatusTracker allows both to be based
      * on the same data.
      */
-    virtual void fileStatusChanged(const QString &systemFileName, SyncFileStatus fileStatus) = 0;
+    virtual void fileStatusChanged(const QString &systemFileName, OCC::SyncFileStatus fileStatus) = 0;
 
 signals:
     /// Emitted when a user-initiated hydration starts
     void beginHydrating();
     /// Emitted when the hydration ends
     void doneHydrating();
+    // Emitted when hydration fails
+    void failureHydrating(int errorCode, int statusCode, const QString &errorString, const QString &fileName);
 
 protected:
     /** Setup the plugin for the folder.
@@ -293,20 +318,22 @@ public:
     VfsOff(QObject* parent = nullptr);
     ~VfsOff() override;
 
-    Mode mode() const override { return Vfs::Off; }
+    [[nodiscard]] Mode mode() const override { return Vfs::Off; }
 
-    QString fileSuffix() const override { return QString(); }
+    [[nodiscard]] QString fileSuffix() const override { return QString(); }
 
     void stop() override {}
     void unregisterFolder() override {}
 
-    bool socketApiPinStateActionsShown() const override { return false; }
-    bool isHydrating() const override { return false; }
+    [[nodiscard]] bool socketApiPinStateActionsShown() const override { return false; }
+    [[nodiscard]] bool isHydrating() const override { return false; }
 
     Result<void, QString> updateMetadata(const QString &, time_t, qint64, const QByteArray &) override { return {}; }
+    Result<Vfs::ConvertToPlaceholderResult, QString> updatePlaceholderMarkInSync(const QString &filePath, const QByteArray &fileId) override {Q_UNUSED(filePath) Q_UNUSED(fileId) return {QString{}};}
+    [[nodiscard]] bool isPlaceHolderInSync(const QString &filePath) const override { Q_UNUSED(filePath) return true; }
     Result<void, QString> createPlaceholder(const SyncFileItem &) override { return {}; }
     Result<void, QString> dehydratePlaceholder(const SyncFileItem &) override { return {}; }
-    Result<ConvertToPlaceholderResult, QString> convertToPlaceholder(const QString &, const SyncFileItem &, const QString &) override { return ConvertToPlaceholderResult::Ok; }
+    Result<ConvertToPlaceholderResult, QString> convertToPlaceholder(const QString &, const SyncFileItem &, const QString &, const UpdateMetadataTypes) override { return ConvertToPlaceholderResult::Ok; }
 
     bool needsMetadataUpdate(const SyncFileItem &) override { return false; }
     bool isDehydratedPlaceholder(const QString &) override { return false; }
@@ -314,10 +341,10 @@ public:
 
     bool setPinState(const QString &, PinState) override { return true; }
     Optional<PinState> pinState(const QString &) override { return PinState::AlwaysLocal; }
-    AvailabilityResult availability(const QString &) override { return VfsItemAvailability::AlwaysLocal; }
+    AvailabilityResult availability(const QString &, const AvailabilityRecursivity) override { return VfsItemAvailability::AlwaysLocal; }
 
 public slots:
-    void fileStatusChanged(const QString &, SyncFileStatus) override {}
+    void fileStatusChanged(const QString &, OCC::SyncFileStatus) override {}
 
 protected:
     void startImpl(const VfsSetupParams &) override {}

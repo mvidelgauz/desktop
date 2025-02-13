@@ -26,6 +26,8 @@
 #include <QObject>
 #include <QStringList>
 #include <QUuid>
+#include <QSet>
+
 #include <set>
 #include <chrono>
 #include <memory>
@@ -82,8 +84,10 @@ public:
      * Version 2: introduction of metadata_parent hash in 2.6.0
      *            (version remains readable by 2.5.1)
      * Version 3: introduction of new windows vfs mode in 2.6.0
+     * Version 5: available in oC client 4.0.0 and 4.2.0
+     * Version 13: available in oC client 5.2.0 and 5.3.1
      */
-    static int maxSettingsVersion() { return 3; }
+    static int maxSettingsVersion() { return 13; }
 
     /// Ensure / as separator and trailing /.
     static QString prepareLocalPath(const QString &path);
@@ -92,7 +96,7 @@ public:
     static QString prepareTargetPath(const QString &path);
 
     /// journalPath relative to localPath.
-    QString absoluteJournalPath() const;
+    [[nodiscard]] QString absoluteJournalPath() const;
 
     /// Returns the relative journal path that's appropriate for this folder and account.
     QString defaultJournalPath(AccountPtr account);
@@ -125,23 +129,23 @@ public:
     /**
      * The account the folder is configured on.
      */
-    AccountState *accountState() const { return _accountState.data(); }
+    [[nodiscard]] AccountState *accountState() const { return _accountState.data(); }
 
     /**
      * alias or nickname
      */
-    QString alias() const;
-    QString shortGuiRemotePathOrAppName() const; // since 2.0 we don't want to show aliases anymore, show the path instead
+    [[nodiscard]] QString alias() const;
+    [[nodiscard]] QString shortGuiRemotePathOrAppName() const; // since 2.0 we don't want to show aliases anymore, show the path instead
 
     /**
      * short local path to display on the GUI  (native separators)
      */
-    QString shortGuiLocalPath() const;
+    [[nodiscard]] QString shortGuiLocalPath() const;
 
     /**
      * canonical local folder path, always ends with /
      */
-    QString path() const;
+    [[nodiscard]] QString path() const;
 
     /**
      * cleaned canonical folder path, like path() but never ends with a /
@@ -149,37 +153,39 @@ public:
      * Wrapper for QDir::cleanPath(path()) except for "Z:/",
      * where it returns "Z:" instead of "Z:/".
      */
-    QString cleanPath() const;
+    [[nodiscard]] QString cleanPath() const;
 
     /**
      * remote folder path, usually without trailing /, exception "/"
      */
-    QString remotePath() const;
+    [[nodiscard]] QString remotePath() const;
 
     /**
      * remote folder path, always with a trailing /
      */
-    QString remotePathTrailingSlash() const;
+    [[nodiscard]] QString remotePathTrailingSlash() const;
+
+    [[nodiscard]] QString fulllRemotePathToPathInSyncJournalDb(const QString &fullRemotePath) const;
 
     void setNavigationPaneClsid(const QUuid &clsid) { _definition.navigationPaneClsid = clsid; }
-    QUuid navigationPaneClsid() const { return _definition.navigationPaneClsid; }
+    [[nodiscard]] QUuid navigationPaneClsid() const { return _definition.navigationPaneClsid; }
 
     /**
      * remote folder path with server url
      */
-    QUrl remoteUrl() const;
+    [[nodiscard]] QUrl remoteUrl() const;
 
     /**
      * switch sync on or off
      */
     void setSyncPaused(bool);
 
-    bool syncPaused() const;
+    [[nodiscard]] bool syncPaused() const;
 
     /**
      * Returns true when the folder may sync.
      */
-    bool canSync() const;
+    [[nodiscard]] bool canSync() const;
 
     void prepareToSync();
 
@@ -187,15 +193,15 @@ public:
      * True if the folder is busy and can't initiate
      * a synchronization
      */
-    virtual bool isBusy() const;
+    [[nodiscard]] virtual bool isBusy() const;
 
     /** True if the folder is currently synchronizing */
-    bool isSyncRunning() const;
+    [[nodiscard]] bool isSyncRunning() const;
 
     /**
      * return the last sync result with error message and status
      */
-    SyncResult syncResult() const;
+    [[nodiscard]] SyncResult syncResult() const;
 
     /**
       * This is called when the sync folder definition is removed. Do cleanups here.
@@ -206,8 +212,6 @@ public:
       */
     virtual void wipeForRemoval();
 
-    void onAssociatedAccountRemoved();
-
     void setSyncState(SyncResult::Status state);
 
     void setDirtyNetworkLimits();
@@ -216,34 +220,37 @@ public:
       * Ignore syncing of hidden files or not. This is defined in the
       * folder definition
       */
-    bool ignoreHiddenFiles();
+    [[nodiscard]] bool ignoreHiddenFiles();
     void setIgnoreHiddenFiles(bool ignore);
 
     // Used by the Socket API
-    SyncJournalDb *journalDb() { return &_journal; }
-    SyncEngine &syncEngine() { return *_engine; }
-    Vfs &vfs() { return *_vfs; }
+    [[nodiscard]] SyncJournalDb *journalDb() const { return &_journal; }
+    [[nodiscard]] SyncEngine &syncEngine() const { return *_engine; }
+    [[nodiscard]] Vfs &vfs() const { return *_vfs; }
 
-    RequestEtagJob *etagJob() { return _requestEtagJob; }
-    std::chrono::milliseconds msecSinceLastSync() const { return std::chrono::milliseconds(_timeSinceLastSyncDone.elapsed()); }
-    std::chrono::milliseconds msecLastSyncDuration() const { return _lastSyncDuration; }
-    int consecutiveFollowUpSyncs() const { return _consecutiveFollowUpSyncs; }
-    int consecutiveFailingSyncs() const { return _consecutiveFailingSyncs; }
+    [[nodiscard]] RequestEtagJob *etagJob() const { return _requestEtagJob; }
+    [[nodiscard]] std::chrono::milliseconds msecSinceLastSync() const { return std::chrono::milliseconds(_timeSinceLastSyncDone.elapsed()); }
+    [[nodiscard]] std::chrono::milliseconds msecLastSyncDuration() const { return _lastSyncDuration; }
+    [[nodiscard]] int consecutiveFollowUpSyncs() const { return _consecutiveFollowUpSyncs; }
+    [[nodiscard]] int consecutiveFailingSyncs() const { return _consecutiveFailingSyncs; }
 
     /// Saves the folder data in the account's settings.
     void saveToSettings() const;
     /// Removes the folder from the account's settings.
     void removeFromSettings() const;
 
-    /**
-      * Returns whether a file inside this folder should be excluded.
-      */
-    bool isFileExcludedAbsolute(const QString &fullPath) const;
+    /* Check if the path is ignored. */
+    [[nodiscard]] bool pathIsIgnored(const QString &path) const;
 
     /**
       * Returns whether a file inside this folder should be excluded.
       */
-    bool isFileExcludedRelative(const QString &relativePath) const;
+    [[nodiscard]] bool isFileExcludedAbsolute(const QString &fullPath) const;
+
+    /**
+      * Returns whether a file inside this folder should be excluded.
+      */
+    [[nodiscard]] bool isFileExcludedRelative(const QString &relativePath) const;
 
     /** Calls schedules this folder on the FolderMan after a short delay.
       *
@@ -255,6 +262,10 @@ public:
       * The delay doesn't reset with subsequent calls.
       */
     void scheduleThisFolderSoon();
+
+    void acceptInvalidFileName(const QString &filePath);
+
+    void acceptCaseClashConflictFileName(const QString &filePath);
 
     /**
       * Migration: When this flag is true, this folder will save to
@@ -278,27 +289,35 @@ public:
      * and never have an automatic virtual file. But when it's on, the shell context menu will allow
      * users to make existing files virtual.
      */
-    bool virtualFilesEnabled() const;
+    [[nodiscard]] bool virtualFilesEnabled() const;
     void setVirtualFilesEnabled(bool enabled);
 
     void setRootPinState(PinState state);
 
     /** Whether user desires a switch that couldn't be executed yet, see member */
-    bool isVfsOnOffSwitchPending() const { return _vfsOnOffPending; }
+    [[nodiscard]] bool isVfsOnOffSwitchPending() const { return _vfsOnOffPending; }
     void setVfsOnOffSwitchPending(bool pending) { _vfsOnOffPending = pending; }
 
-    /** Whether this folder should show selective sync ui */
-    bool supportsSelectiveSync() const;
+    void switchToVirtualFiles();
 
-    QString fileFromLocalPath(const QString &localPath) const;
+    void processSwitchedToVirtualFiles();
+
+    /** Whether this folder should show selective sync ui */
+    [[nodiscard]] bool supportsSelectiveSync() const;
+
+    [[nodiscard]] QString fileFromLocalPath(const QString &localPath) const;
+
+    void whitelistPath(const QString &path);
+    void blacklistPath(const QString &path);
+    void migrateBlackListPath(const QString &legacyPath);
 
 signals:
     void syncStateChange();
     void syncStarted();
-    void syncFinished(const SyncResult &result);
-    void progressInfo(const ProgressInfo &progress);
+    void syncFinished(const OCC::SyncResult &result);
+    void progressInfo(const OCC::ProgressInfo &progress);
     void newBigFolderDiscovered(const QString &); // A new folder bigger than the threshold was discovered
-    void syncPausedChanged(Folder *, bool paused);
+    void syncPausedChanged(OCC::Folder *, bool paused);
     void canSyncChanged();
 
     /**
@@ -315,7 +334,11 @@ public slots:
     void slotTerminateSync();
 
     // connected to the corresponding signals in the SyncEngine
-    void slotAboutToRemoveAllFiles(SyncFileItem::Direction, std::function<void(bool)> callback);
+    void slotAboutToRemoveAllFiles(OCC::SyncFileItem::Direction, std::function<void(bool)> callback);
+
+    void slotNeedToRemoveRemnantsReadOnlyFolders(const QList<SyncFileItemPtr> &folders,
+                                                 const QString &localPath,
+                                                 std::function<void(bool)> callback);
 
     /**
       * Starts a sync operation
@@ -325,16 +348,28 @@ public slots:
     void startSync(const QStringList &pathList = QStringList());
 
     int slotDiscardDownloadProgress();
-    int downloadInfoCount();
+    [[nodiscard]] int downloadInfoCount();
     int slotWipeErrorBlacklist();
-    int errorBlackListEntryCount();
+    [[nodiscard]] int errorBlackListEntryCount();
 
     /**
        * Triggered by the folder watcher when a file/dir in this folder
        * changes. Needs to check whether this change should trigger a new
        * sync run to be scheduled.
        */
-    void slotWatchedPathChanged(const QString &path, ChangeReason reason);
+    void slotWatchedPathChanged(const QStringView &path, const OCC::Folder::ChangeReason reason);
+
+    /*
+    * Triggered when lock files were removed
+    */
+    void slotFilesLockReleased(const QSet<QString> &files);
+
+    /*
+     * Triggered when lock files were added
+     */
+    void slotFilesLockImposed(const QSet<QString> &files);
+
+    void slotLockedFilesFound(const QSet<QString> &files);
 
     /**
      * Mark a virtual file as being requested for download, and start a sync.
@@ -364,18 +399,30 @@ public slots:
     /** Ensures that the next sync performs a full local discovery. */
     void slotNextSyncFullLocalDiscovery();
 
+    void setSilenceErrorsUntilNextSync(bool silenceErrors);
+
+    /** Deletes local copies of E2EE files.
+     * Intended for clean-up after disabling E2EE for an account.
+     */
+    void removeLocalE2eFiles();
+
 private slots:
     void slotSyncStarted();
     void slotSyncFinished(bool);
+    /*
+     * Disconnects all the slots from the FolderWatcher
+     * Needs to be called each time a folder is removed
+     */
+    void disconnectFolderWatcher();
 
     /** Adds a error message that's not tied to a specific item.
      */
-    void slotSyncError(const QString &message, ErrorCategory category = ErrorCategory::Normal);
+    void slotSyncError(const QString &message, OCC::ErrorCategory category);
 
-    void slotAddErrorToGui(SyncFileItem::Status status, const QString &errorMessage, const QString &subject = {});
+    void slotAddErrorToGui(OCC::SyncFileItem::Status status, const QString &errorMessage, const QString &subject, OCC::ErrorCategory category);
 
-    void slotTransmissionProgress(const ProgressInfo &pi);
-    void slotItemCompleted(const SyncFileItemPtr &);
+    void slotTransmissionProgress(const OCC::ProgressInfo &pi);
+    void slotItemCompleted(const OCC::SyncFileItemPtr &, OCC::ErrorCategory errorCategory);
 
     void slotRunEtagJob();
     void etagRetrieved(const QByteArray &, const QDateTime &tp);
@@ -384,6 +431,7 @@ private slots:
     void slotEmitFinishedDelayed();
 
     void slotNewBigFolderDiscovered(const QString &, bool isExternal);
+    void slotExistingFolderNowBig(const QString &folderPath);
 
     void slotLogPropagationStart();
 
@@ -400,7 +448,7 @@ private slots:
     void slotFolderConflicts(const QString &folder, const QStringList &conflictPaths);
 
     /** Warn users if they create a file or folder that is selective-sync excluded */
-    void warnOnNewExcludedItem(const SyncJournalFileRecord &record, const QStringRef &path);
+    void warnOnNewExcludedItem(const OCC::SyncJournalFileRecord &record, const QStringView &path);
 
     /** Warn users about an unreliable folder watcher */
     void slotWatcherUnreliable(const QString &message);
@@ -415,6 +463,11 @@ private slots:
     /** Unblocks normal sync operation */
     void slotHydrationDone();
 
+    /* Hydration failed, perform required steps to notify user */
+    void slotHydrationFailed(int errorCode, int statusCode, const QString &errorString, const QString &fileName);
+
+    void slotCapabilitiesChanged();
+
 private:
     void connectSyncRoot();
 
@@ -422,9 +475,9 @@ private:
 
     void showSyncResultPopup();
 
-    void checkLocalPath();
+    bool checkLocalPath();
 
-    void setSyncOptions();
+    SyncOptions initializeSyncOptions() const;
 
     enum LogStatus {
         LogStatusRemove,
@@ -442,6 +495,14 @@ private:
 
     void startVfs();
 
+    void correctPlaceholderFiles();
+
+    void appendPathToSelectiveSyncList(const QString &path, const SyncJournalDb::SelectiveSyncListType listType);
+    void removePathFromSelectiveSyncList(const QString &path, const SyncJournalDb::SelectiveSyncListType listType);
+
+    static void postExistingFolderNowBigNotification(const QString &folderPath);
+    void postExistingFolderNowBigActivity(const QString &folderPath) const;
+
     AccountStatePtr _accountState;
     FolderDefinition _definition;
     QString _canonicalLocalPath; // As returned with QFileInfo:canonicalFilePath.  Always ends with "/"
@@ -457,11 +518,11 @@ private:
 
     /// The number of syncs that failed in a row.
     /// Reset when a sync is successful.
-    int _consecutiveFailingSyncs;
+    int _consecutiveFailingSyncs = 0;
 
     /// The number of requested follow-up syncs.
     /// Reset when no follow-up is requested.
-    int _consecutiveFollowUpSyncs;
+    int _consecutiveFollowUpSyncs = 0;
 
     mutable SyncJournalDb _journal;
 
@@ -496,6 +557,12 @@ private:
      */
     bool _vfsOnOffPending = false;
 
+    /** Whether this folder has just switched to VFS or not
+     */
+    bool _hasSwitchedToVfs = false;
+
+    bool _silenceErrorsUntilNextSync = false;
+
     /**
      * Watches this folder's local directory for changes.
      *
@@ -512,6 +579,11 @@ private:
      * The vfs mode instance (created by plugin) to use. Never null.
      */
     QSharedPointer<Vfs> _vfs;
+
+    QMetaObject::Connection _officeFileLockReleaseUnlockSuccess;
+    QMetaObject::Connection _officeFileLockReleaseUnlockFailure;
+    QMetaObject::Connection _fileLockSuccess;
+    QMetaObject::Connection _fileLockFailure;
 };
 }
 

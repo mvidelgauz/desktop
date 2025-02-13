@@ -2,10 +2,15 @@ if (WIN32)
     add_definitions(-D_WIN32_WINNT=_WIN32_WINNT_WIN10)
 
     add_library(nextcloudsync_vfs_cfapi SHARED
+        cfapiwrapper.h
         cfapiwrapper.cpp
+        hydrationjob.h
         hydrationjob.cpp
+        vfs_cfapi.h
         vfs_cfapi.cpp
     )
+    
+	add_subdirectory(shellext)
 
     target_link_libraries(nextcloudsync_vfs_cfapi PRIVATE
         Nextcloud::sync
@@ -42,4 +47,6 @@ if (WIN32)
       LIBRARY DESTINATION "${vfs_installdir}"
       RUNTIME DESTINATION "${vfs_installdir}"
     )
+
+    install(FILES $<TARGET_PDB_FILE:nextcloudsync_vfs_cfapi> DESTINATION bin OPTIONAL)
 endif()

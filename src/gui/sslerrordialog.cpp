@@ -13,6 +13,7 @@
  */
 #include "configfile.h"
 #include "sslerrordialog.h"
+#include "theme.h"
 
 #include <QtGui>
 #include <QtNetwork>
@@ -56,7 +57,6 @@ bool SslDialogErrorHandler::handleErrors(QList<QSslError> errors, const QSslConf
 
 SslErrorDialog::SslErrorDialog(AccountPtr account, QWidget *parent)
     : QDialog(parent)
-    , _allTrusted(false)
     , _ui(new Ui::SslErrorDialog)
     , _account(account)
 {
@@ -68,6 +68,8 @@ SslErrorDialog::SslErrorDialog(AccountPtr account, QWidget *parent)
     QPushButton *cancelButton =
         _ui->_dialogButtonBox->button(QDialogButtonBox::Cancel);
     okButton->setEnabled(false);
+
+    _ui->_cbTrustConnect->setEnabled(!Theme::instance()->forbidBadSSL());
     connect(_ui->_cbTrustConnect, &QAbstractButton::clicked,
         okButton, &QWidget::setEnabled);
 
@@ -105,6 +107,8 @@ bool SslErrorDialog::checkFailingCertsKnown(const QList<QSslError> &errors)
 
     QStringList errorStrings;
 
+    QStringList additionalErrorStrings;
+
     QList<QSslCertificate> trustedCerts = _account->approvedCerts();
 
     for (int i = 0; i < errors.count(); ++i) {
@@ -115,6 +119,8 @@ bool SslErrorDialog::checkFailingCertsKnown(const QList<QSslError> &errors)
         errorStrings += error.errorString();
         if (!error.certificate().isNull()) {
             _unknownCerts.append(error.certificate());
+        } else {
+            additionalErrorStrings.append(error.errorString());
         }
     }
 
@@ -146,6 +152,17 @@ bool SslErrorDialog::checkFailingCertsKnown(const QList<QSslError> &errors)
             msg += QL("<hr/>");
         }
     }
+
+    if (!additionalErrorStrings.isEmpty()) {
+        msg += QL("<h4>") + tr("Additional errors:") + QL("</h4>");
+
+        for (const auto &errorString : additionalErrorStrings) {
+            msg += QL("<div id=\"ca_error\">");
+            msg += QL("<p>") + errorString + QL("</p>");
+            msg += QL("</div>");
+        }
+    }
+
     msg += QL("</div></body></html>");
 
     auto *doc = new QTextDocument(nullptr);
@@ -184,7 +201,7 @@ QString SslErrorDialog::certDiv(QSslCertificate cert) const
 
     msg += QL("<p>");
 
-    if (cert.effectiveDate() < QDateTime(QDate(2016, 1, 1), QTime(), Qt::UTC)) {
+    if (cert.effectiveDate() < QDateTime(QDate(2016, 1, 1), QTime(), QTimeZone::UTC)) {
 	QString sha1sum = Utility::formatFingerprint(cert.digest(QCryptographicHash::Sha1).toHex());
         msg += tr("Fingerprint (SHA1): <tt>%1</tt>").arg(sha1sum) + QL("<br/>");
     }

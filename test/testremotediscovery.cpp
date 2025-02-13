@@ -48,6 +48,15 @@ class TestRemoteDiscovery : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        AbstractNetworkJob::enableTimeout = true;
+
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
 
     void testRemoteDiscoveryError_data()
     {
@@ -95,7 +104,7 @@ private slots:
         QString fatalErrorPrefix = "Server replied with an error while reading directory \"B\" : ";
         fakeFolder.setServerOverride([&](QNetworkAccessManager::Operation op, const QNetworkRequest &req, QIODevice *)
                 -> QNetworkReply *{
-            if (req.attribute(QNetworkRequest::CustomVerbAttribute) == "PROPFIND" && req.url().path().endsWith(errorFolder)) {
+            if (req.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "PROPFIND" && req.url().path().endsWith(errorFolder)) {
                 if (errorKind == InvalidXML) {
                     return new FakeBrokenXmlPropfindReply(fakeFolder.remoteModifier(), op, req, this);
                 } else if (errorKind == Timeout) {
@@ -154,7 +163,7 @@ private slots:
 
         fakeFolder.setServerOverride([&](QNetworkAccessManager::Operation op, const QNetworkRequest &req, QIODevice *)
                 -> QNetworkReply *{
-            if (req.attribute(QNetworkRequest::CustomVerbAttribute) == "PROPFIND" && req.url().path().endsWith("nopermissions"))
+            if (req.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "PROPFIND" && req.url().path().endsWith("nopermissions"))
                 return new MissingPermissionsPropfindReply(fakeFolder.remoteModifier(), op, req, this);
             return nullptr;
         });
@@ -169,7 +178,7 @@ private slots:
         QCOMPARE(completeSpy.findItem("nopermissions/A")->_instruction, CSYNC_INSTRUCTION_ERROR);
         QVERIFY(completeSpy.findItem("noetag")->_errorString.contains("ETag"));
         QVERIFY(completeSpy.findItem("nofileid")->_errorString.contains("file id"));
-        QVERIFY(completeSpy.findItem("nopermissions/A")->_errorString.contains("permissions"));
+        QVERIFY(completeSpy.findItem("nopermissions/A")->_errorString.contains("permission"));
     }
 };
 

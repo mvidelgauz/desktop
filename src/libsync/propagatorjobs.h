@@ -24,8 +24,9 @@ namespace OCC {
  * Tags for checksum header.
  * It's here for being shared between Upload- and Download Job
  */
-static const char checkSumHeaderC[] = "OC-Checksum";
-static const char contentMd5HeaderC[] = "Content-MD5";
+constexpr auto checkSumHeaderC = "OC-Checksum";
+constexpr auto contentMd5HeaderC = "Content-MD5";
+constexpr auto checksumRecalculateOnServerHeaderC = "X-Recalculate-Hash";
 
 /**
  * @brief Declaration of the other propagation jobs
@@ -44,7 +45,7 @@ public:
 private:
     bool removeRecursively(const QString &path);
     QString _error;
-    bool _moveToTrash;
+    bool _moveToTrash = false;
 };
 
 /**
@@ -57,7 +58,6 @@ class PropagateLocalMkdir : public PropagateItemJob
 public:
     PropagateLocalMkdir(OwncloudPropagator *propagator, const SyncFileItemPtr &item)
         : PropagateItemJob(propagator, item)
-        , _deleteExistingFile(false)
     {
     }
     void start() override;
@@ -74,7 +74,7 @@ private:
     void startLocalMkdir();
     void startDemanglingName(const QString &parentPath);
 
-    bool _deleteExistingFile;
+    bool _deleteExistingFile = false;
 };
 
 /**
@@ -85,11 +85,12 @@ class PropagateLocalRename : public PropagateItemJob
 {
     Q_OBJECT
 public:
-    PropagateLocalRename(OwncloudPropagator *propagator, const SyncFileItemPtr &item)
-        : PropagateItemJob(propagator, item)
-    {
-    }
+    PropagateLocalRename(OwncloudPropagator *propagator, const SyncFileItemPtr &item);
     void start() override;
-    JobParallelism parallelism() override { return _item->isDirectory() ? WaitForFinished : FullParallelism; }
+    [[nodiscard]] JobParallelism parallelism() const override { return _item->isDirectory() ? WaitForFinished : FullParallelism; }
+
+private:
+    bool deleteOldDbRecord(const QString &fileName);
+
 };
 }

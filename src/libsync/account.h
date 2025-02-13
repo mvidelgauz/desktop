@@ -16,9 +16,17 @@
 #ifndef SERVERCONNECTION_H
 #define SERVERCONNECTION_H
 
+#include "accountfwd.h"
+#include "capabilities.h"
+#include "clientsideencryption.h"
+#include "clientstatusreporting.h"
+#include "common/utility.h"
+#include "syncfileitem.h"
+
 #include <QByteArray>
 #include <QUrl>
 #include <QNetworkCookie>
+#include <QNetworkProxy>
 #include <QNetworkRequest>
 #include <QSslSocket>
 #include <QSslCertificate>
@@ -26,15 +34,14 @@
 #include <QSslCipher>
 #include <QSslError>
 #include <QSharedPointer>
+#include <QHttpMultiPart>
+#include <QTimer>
 
 #ifndef TOKEN_AUTH_ONLY
 #include <QPixmap>
 #endif
 
-#include "common/utility.h"
 #include <memory>
-#include "capabilities.h"
-#include "clientsideencryption.h"
 
 class QSettings;
 class QNetworkReply;
@@ -50,12 +57,11 @@ class ReadPasswordJob;
 namespace OCC {
 
 class AbstractCredentials;
-class Account;
-using AccountPtr = QSharedPointer<Account>;
 class AccessManager;
 class SimpleNetworkJob;
 class PushNotifications;
 class UserStatusConnector;
+class SyncJournalDb;
 
 /**
  * @brief Reimplement this to handle SSL errors from libsync
@@ -80,41 +86,88 @@ class OWNCLOUDSYNC_EXPORT Account : public QObject
     Q_OBJECT
     Q_PROPERTY(QString id MEMBER _id)
     Q_PROPERTY(QString davUser MEMBER _davUser)
-    Q_PROPERTY(QString displayName MEMBER _displayName)
+    Q_PROPERTY(QString davDisplayName MEMBER _davDisplayName)
+    Q_PROPERTY(QString prettyName READ prettyName NOTIFY prettyNameChanged)
     Q_PROPERTY(QUrl url MEMBER _url)
+    Q_PROPERTY(bool e2eEncryptionKeysGenerationAllowed MEMBER _e2eEncryptionKeysGenerationAllowed)
+    Q_PROPERTY(bool askUserForMnemonic READ askUserForMnemonic WRITE setAskUserForMnemonic NOTIFY askUserForMnemonicChanged)
+    Q_PROPERTY(AccountNetworkProxySetting networkProxySetting READ networkProxySetting WRITE setNetworkProxySetting NOTIFY networkProxySettingChanged)
+    Q_PROPERTY(QNetworkProxy::ProxyType proxyType READ proxyType WRITE setProxyType NOTIFY proxyTypeChanged)
+    Q_PROPERTY(QString proxyHostName READ proxyHostName WRITE setProxyHostName NOTIFY proxyHostNameChanged)
+    Q_PROPERTY(int proxyPort READ proxyPort WRITE setProxyPort NOTIFY proxyPortChanged)
+    Q_PROPERTY(bool proxyNeedsAuth READ proxyNeedsAuth WRITE setProxyNeedsAuth NOTIFY proxyNeedsAuthChanged)
+    Q_PROPERTY(QString proxyUser READ proxyUser WRITE setProxyUser NOTIFY proxyUserChanged)
+    Q_PROPERTY(QString proxyPassword READ proxyPassword WRITE setProxyPassword NOTIFY proxyPasswordChanged)
+    Q_PROPERTY(AccountNetworkTransferLimitSetting uploadLimitSetting READ uploadLimitSetting WRITE setUploadLimitSetting NOTIFY uploadLimitSettingChanged)
+    Q_PROPERTY(AccountNetworkTransferLimitSetting downloadLimitSetting READ downloadLimitSetting WRITE setDownloadLimitSetting NOTIFY downloadLimitSettingChanged)
+    Q_PROPERTY(unsigned int uploadLimit READ uploadLimit WRITE setUploadLimit NOTIFY uploadLimitChanged)
+    Q_PROPERTY(unsigned int downloadLimit READ downloadLimit WRITE setDownloadLimit NOTIFY downloadLimitChanged)
+    Q_PROPERTY(bool enforceUseHardwareTokenEncryption READ enforceUseHardwareTokenEncryption NOTIFY enforceUseHardwareTokenEncryptionChanged)
+    Q_PROPERTY(QString encryptionHardwareTokenDriverPath READ encryptionHardwareTokenDriverPath NOTIFY encryptionHardwareTokenDriverPathChanged)
+    Q_PROPERTY(QByteArray encryptionCertificateFingerprint READ encryptionCertificateFingerprint WRITE setEncryptionCertificateFingerprint NOTIFY encryptionCertificateFingerprintChanged)
 
 public:
+    // We need to decide whether to use the client's global proxy settings or whether to use
+    // a specific setting for each account. Hence this enum
+    enum class AccountNetworkProxySetting {
+        GlobalProxy = 0,
+        AccountSpecificProxy,
+    };
+    Q_ENUM(AccountNetworkProxySetting)
+
+    enum class AccountNetworkTransferLimitSetting {
+        GlobalLimit = -2,
+        AutoLimit, // Value under 0 is interpreted as auto in general
+        NoLimit,
+        ManualLimit,
+    };
+    Q_ENUM(AccountNetworkTransferLimitSetting)
+
     static AccountPtr create();
     ~Account() override;
 
     AccountPtr sharedFromThis();
 
+    [[nodiscard]] AccountPtr sharedFromThis() const;
+
     /**
      * The user that can be used in dav url.
      *
-     * This can very well be different frome the login user that's
+     * This can very well be different from the login user that's
      * stored in credentials()->user().
      */
-    QString davUser() const;
+    [[nodiscard]] QString davUser() const;
     void setDavUser(const QString &newDavUser);
 
-    QString davDisplayName() const;
+    [[nodiscard]] QString davDisplayName() const;
     void setDavDisplayName(const QString &newDisplayName);
 
 #ifndef TOKEN_AUTH_ONLY
-    QImage avatar() const;
+    [[nodiscard]] QImage avatar() const;
     void setAvatar(const QImage &img);
 #endif
 
     /// The name of the account as shown in the toolbar
-    QString displayName() const;
+    [[nodiscard]] QString displayName() const;
+
+    /// User id in a form 'user@example.de, optionally port is added (if it is not 80 or 443)
+    [[nodiscard]] QString userIdAtHostWithPort() const;
+
+    /// The name of the account that is displayed as nicely as possible,
+    /// e.g. the actual name of the user (John Doe). If this cannot be
+    /// provided, defaults to davUser (e.g. johndoe)
+    [[nodiscard]] QString prettyName() const;
+
+    [[nodiscard]] QColor accentColor() const;
+    [[nodiscard]] QColor headerColor() const;
+    [[nodiscard]] QColor headerTextColor() const;
 
     /// The internal id of the account.
-    QString id() const;
+    [[nodiscard]] QString id() const;
 
     /** Server url of the account */
     void setUrl(const QUrl &url);
-    QUrl url() const { return _url; }
+    [[nodiscard]] QUrl url() const { return _url; }
 
     /// Adjusts _userVisibleUrl once the host to use is discovered.
     void setUserVisibleHost(const QString &host);
@@ -124,20 +177,27 @@ public:
      *        a trailing slash.
      * @returns the (themeable) dav path for the account.
      */
-    QString davPath() const;
+    [[nodiscard]] QString davPath() const;
+
+    /**
+     * @brief The possibly themed dav path root for the account. It has
+     *        no trailing slash.
+     * @returns the (themeable) dav path for the account.
+     */
+    [[nodiscard]] QString davPathRoot() const;
 
     /** Returns webdav entry URL, based on url() */
-    QUrl davUrl() const;
+    [[nodiscard]] QUrl davUrl() const;
 
     /** Returns the legacy permalink url for a file.
      *
      * This uses the old way of manually building the url. New code should
      * use the "privatelink" property accessible via PROPFIND.
      */
-    QUrl deprecatedPrivateLinkUrl(const QByteArray &numericFileId) const;
+    [[nodiscard]] QUrl deprecatedPrivateLinkUrl(const QByteArray &numericFileId) const;
 
     /** Holds the accounts credentials */
-    AbstractCredentials *credentials() const;
+    [[nodiscard]] AbstractCredentials *credentials() const;
     void setCredentials(AbstractCredentials *cred);
 
     /** Create a network request on the account's QNAM.
@@ -154,6 +214,9 @@ public:
     QNetworkReply *sendRawRequest(const QByteArray &verb,
         const QUrl &url, QNetworkRequest req, const QByteArray &data);
 
+    QNetworkReply *sendRawRequest(const QByteArray &verb,
+        const QUrl &url, QNetworkRequest req, QHttpMultiPart *data);
+
     /** Create and start network job for a simple one-off request.
      *
      * More complicated requests typically create their own job types.
@@ -165,7 +228,7 @@ public:
 
     /** The ssl configuration during the first connection */
     QSslConfiguration getOrCreateSslConfig();
-    QSslConfiguration sslConfiguration() const { return _sslConfiguration; }
+    [[nodiscard]] QSslConfiguration sslConfiguration() const { return _sslConfiguration; }
     void setSslConfiguration(const QSslConfiguration &config);
     // Because of bugs in Qt, we use this to store info needed for the SSL Button
     QSslCipher _sessionCipher;
@@ -174,7 +237,7 @@ public:
 
 
     /** The certificates of the account */
-    QList<QSslCertificate> approvedCerts() const { return _approvedCerts; }
+    [[nodiscard]] QList<QSslCertificate> approvedCerts() const { return _approvedCerts; }
     void setApprovedCerts(const QList<QSslCertificate> certs);
     void addApprovedCerts(const QList<QSslCertificate> certs);
 
@@ -187,14 +250,14 @@ public:
     void setSslErrorHandler(AbstractSslErrorHandler *handler);
 
     // To be called by credentials only, for storing username and the like
-    QVariant credentialSetting(const QString &key) const;
+    [[nodiscard]] QVariant credentialSetting(const QString &key) const;
     void setCredentialSetting(const QString &key, const QVariant &value);
 
     /** Assign a client certificate */
-    void setCertificate(const QByteArray certficate = QByteArray(), const QString privateKey = QString());
+    void setCertificate(const QByteArray certificate = QByteArray(), const QString privateKey = QString());
 
     /** Access the server capabilities */
-    const Capabilities &capabilities() const;
+    [[nodiscard]] const Capabilities &capabilities() const;
     void setCapabilities(const QVariantMap &caps);
 
     /** Access the server version
@@ -202,7 +265,11 @@ public:
      * For servers >= 10.0.0, this can be the empty string until capabilities
      * have been received.
      */
-    QString serverVersion() const;
+    [[nodiscard]] QString serverVersion() const;
+
+    // check if the checksum validation of E2EE metadata is allowed to be skipped via config file, this will only work before client 3.9.0
+    [[nodiscard]] bool shouldSkipE2eeMetadataChecksumValidation() const;
+    void resetShouldSkipE2eeMetadataChecksumValidation();
 
     /** Server version for easy comparison.
      *
@@ -210,9 +277,14 @@ public:
      *
      * Will be 0 if the version is not available yet.
      */
-    int serverVersionInt() const;
+    [[nodiscard]] int serverVersionInt() const;
 
-    static int makeServerVersion(int majorVersion, int minorVersion, int patchVersion);
+    [[nodiscard]] bool serverHasMountRootProperty() const;
+
+    static constexpr int makeServerVersion(const int majorVersion, const int minorVersion, const int patchVersion) {
+        return (majorVersion << 16) + (minorVersion << 8) + patchVersion;
+    };
+
     void setServerVersion(const QString &version);
 
     /** Whether the server is too old.
@@ -225,7 +297,15 @@ public:
      *
      * This function returns true if the server is beyond the weak limit.
      */
-    bool serverVersionUnsupported() const;
+    [[nodiscard]] bool serverVersionUnsupported() const;
+
+    [[nodiscard]] bool secureFileDropSupported() const;
+
+    [[nodiscard]] bool isUsernamePrefillSupported() const;
+
+    [[nodiscard]] bool isChecksumRecalculateRequestSupported() const;
+
+    [[nodiscard]] int checksumRecalculateServerVersionMinSupportedMajor() const;
 
     /** True when the server connection is using HTTP2  */
     bool isHttp2Supported() { return _http2Supported; }
@@ -257,15 +337,96 @@ public:
 
     void setupUserStatusConnector();
     void trySetupPushNotifications();
-    PushNotifications *pushNotifications() const;
+    [[nodiscard]] PushNotifications *pushNotifications() const;
     void setPushNotificationsReconnectInterval(int interval);
 
-    std::shared_ptr<UserStatusConnector> userStatusConnector() const;
+    void trySetupClientStatusReporting();
+
+    void reportClientStatus(const ClientStatusReportingStatus status) const;
+
+    [[nodiscard]] std::shared_ptr<UserStatusConnector> userStatusConnector() const;
+
+    void setLockFileState(const QString &serverRelativePath,
+                          const QString &remoteSyncPathWithTrailingSlash,
+                          const QString &localSyncPath, const QString &etag,
+                          SyncJournalDb * const journal,
+                          const SyncFileItem::LockStatus lockStatus,
+                          const SyncFileItem::LockOwnerType lockOwnerType);
+
+    SyncFileItem::LockStatus fileLockStatus(SyncJournalDb * const journal,
+                                            const QString &folderRelativePath) const;
+
+    bool fileCanBeUnlocked(SyncJournalDb * const journal, const QString &folderRelativePath) const;
+
+    void setTrustCertificates(bool trustCertificates);
+    [[nodiscard]] bool trustCertificates() const;
+
+    void setE2eEncryptionKeysGenerationAllowed(bool allowed);
+    [[nodiscard]] bool e2eEncryptionKeysGenerationAllowed() const;
+
+    [[nodiscard]] bool askUserForMnemonic() const;
+
+    void updateServerSubcription();
+    void updateDesktopEnterpriseChannel();
+
+    // Network-related settings
+    [[nodiscard]] AccountNetworkProxySetting networkProxySetting() const;
+    void setNetworkProxySetting(AccountNetworkProxySetting networkProxySetting);
+
+    [[nodiscard]] QNetworkProxy::ProxyType proxyType() const;
+    void setProxyType(QNetworkProxy::ProxyType proxyType);
+
+    [[nodiscard]] QString proxyHostName() const;
+    void setProxyHostName(const QString &host);
+
+    [[nodiscard]] int proxyPort() const;
+    void setProxyPort(int port);
+
+    [[nodiscard]] bool proxyNeedsAuth() const;
+    void setProxyNeedsAuth(bool needsAuth);
+
+    [[nodiscard]] QString proxyUser() const;
+    void setProxyUser(const QString &user);
+
+    [[nodiscard]] QString proxyPassword() const;
+    void setProxyPassword(const QString &password);
+
+    void setProxySettings(const AccountNetworkProxySetting networkProxySetting,
+                          const QNetworkProxy::ProxyType proxyType,
+                          const QString &proxyHostName,
+                          const int proxyPort,
+                          const bool proxyNeedsAuth,
+                          const QString &proxyUser,
+                          const QString &proxyPassword);
+
+    [[nodiscard]] AccountNetworkTransferLimitSetting uploadLimitSetting() const;
+    void setUploadLimitSetting(AccountNetworkTransferLimitSetting setting);
+
+    [[nodiscard]] AccountNetworkTransferLimitSetting downloadLimitSetting() const;
+    void setDownloadLimitSetting(AccountNetworkTransferLimitSetting setting);
+
+    /** in kbyte/s */
+    [[nodiscard]] unsigned int uploadLimit() const;
+    void setUploadLimit(unsigned int kbytes);
+
+    [[nodiscard]] unsigned int downloadLimit() const;
+    void setDownloadLimit(unsigned int kbytes);
+
+    [[nodiscard]] bool serverHasValidSubscription() const;
+    void setServerHasValidSubscription(bool valid);
+
+    [[nodiscard]] bool enforceUseHardwareTokenEncryption() const;
+
+    [[nodiscard]] QString encryptionHardwareTokenDriverPath() const;
+
+    [[nodiscard]] QByteArray encryptionCertificateFingerprint() const;
+    void setEncryptionCertificateFingerprint(const QByteArray &fingerprint);
 
 public slots:
     /// Used when forgetting credentials
     void clearQNAMCache();
     void slotHandleSslErrors(QNetworkReply *, QList<QSslError>);
+    void setAskUserForMnemonic(const bool ask);
 
 signals:
     /// Emitted whenever there's network activity
@@ -274,42 +435,82 @@ signals:
     /// Triggered by handleInvalidCredentials()
     void invalidCredentials();
 
-    void credentialsFetched(AbstractCredentials *credentials);
-    void credentialsAsked(AbstractCredentials *credentials);
+    void credentialsFetched(OCC::AbstractCredentials *credentials);
+    void credentialsAsked(OCC::AbstractCredentials *credentials);
 
     /// Forwards from QNetworkAccessManager::proxyAuthenticationRequired().
     void proxyAuthenticationRequired(const QNetworkProxy &, QAuthenticator *);
 
     // e.g. when the approved SSL certificates changed
-    void wantsAccountSaved(Account *acc);
+    void wantsAccountSaved(OCC::Account *acc);
 
-    void serverVersionChanged(Account *account, const QString &newVersion, const QString &oldVersion);
+    void wantsFoldersSynced();
+
+    void serverVersionChanged(OCC::Account *account, const QString &newVersion, const QString &oldVersion);
 
     void accountChangedAvatar();
     void accountChangedDisplayName();
+    void prettyNameChanged();
+    void askUserForMnemonicChanged();
+    void enforceUseHardwareTokenEncryptionChanged();
+    void encryptionHardwareTokenDriverPathChanged();
 
     /// Used in RemoteWipe
     void appPasswordRetrieved(QString);
 
-    void pushNotificationsReady(Account *account);
-    void pushNotificationsDisabled(Account *account);
+    void pushNotificationsReady(OCC::Account *account);
+    void pushNotificationsDisabled(OCC::Account *account);
 
     void userStatusChanged();
+
+    void serverUserStatusChanged();
+
+    void capabilitiesChanged();
+
+    void lockFileSuccess();
+    void lockFileError(const QString&);
+
+    void networkProxySettingChanged();
+    void proxyTypeChanged();
+    void proxyHostNameChanged();
+    void proxyPortChanged();
+    void proxyNeedsAuthChanged();
+    void proxyUserChanged();
+    void proxyPasswordChanged();
+    void uploadLimitSettingChanged();
+    void downloadLimitSettingChanged();
+    void uploadLimitChanged();
+    void downloadLimitChanged();
+    void termsOfServiceNeedToBeChecked();
+
+    void encryptionCertificateFingerprintChanged();
+    void userCertificateNeedsMigrationChanged();
 
 protected Q_SLOTS:
     void slotCredentialsFetched();
     void slotCredentialsAsked();
     void slotDirectEditingRecieved(const QJsonDocument &json);
 
+private slots:
+    void removeLockStatusChangeInprogress(const QString &serverRelativePath, const SyncFileItem::LockStatus lockStatus);
+
 private:
     Account(QObject *parent = nullptr);
     void setSharedThis(AccountPtr sharedThis);
+    void updateServerColors();
 
-    static QString davPathBase();
+    [[nodiscard]] static QString davPathBase();
+    [[nodiscard]] QColor serverColor() const;
+
+    bool _trustCertificates = false;
+
+    bool _e2eEncryptionKeysGenerationAllowed = false;
+    bool _e2eAskUserForMnemonic = false;
 
     QWeakPointer<Account> _sharedThis;
     QString _id;
     QString _davUser;
+    QString _davDisplayName;
     QString _displayName;
     QTimer _pushNotificationsReconnectTimer;
 #ifndef TOKEN_AUTH_ONLY
@@ -330,8 +531,11 @@ private:
     QSslConfiguration _sslConfiguration;
     Capabilities _capabilities;
     QString _serverVersion;
+    QColor _serverColor;
+    QColor _serverTextColor = QColorConstants::White;
+    bool _skipE2eeMetadataChecksumValidation = false;
     QScopedPointer<AbstractSslErrorHandler> _sslErrorHandler;
-    QSharedPointer<QNetworkAccessManager> _am;
+    QSharedPointer<QNetworkAccessManager> _networkAccessManager;
     QScopedPointer<AbstractCredentials> _credentials;
     bool _http2Supported = false;
 
@@ -352,7 +556,25 @@ private:
 
     PushNotifications *_pushNotifications = nullptr;
 
+    std::unique_ptr<ClientStatusReporting> _clientStatusReporting;
+
     std::shared_ptr<UserStatusConnector> _userStatusConnector;
+
+    QHash<QString, QVector<SyncFileItem::LockStatus>> _lockStatusChangeInprogress;
+
+    AccountNetworkProxySetting _networkProxySetting = AccountNetworkProxySetting::GlobalProxy;
+    QNetworkProxy::ProxyType _proxyType = QNetworkProxy::NoProxy;
+    QString _proxyHostName;
+    int _proxyPort = 0;
+    bool _proxyNeedsAuth = false;
+    QString _proxyUser;
+    QString _proxyPassword;
+    AccountNetworkTransferLimitSetting _uploadLimitSetting = AccountNetworkTransferLimitSetting::GlobalLimit;
+    AccountNetworkTransferLimitSetting _downloadLimitSetting = AccountNetworkTransferLimitSetting::GlobalLimit;
+    unsigned int _uploadLimit = 0;
+    unsigned int _downloadLimit = 0;
+    bool _serverHasValidSubscription = false;
+    QByteArray _encryptionCertificateFingerprint;
 
     /* IMPORTANT - remove later - FIXME MS@2019-12-07 -->
      * TODO: For "Log out" & "Remove account": Remove client CA certs and KEY!

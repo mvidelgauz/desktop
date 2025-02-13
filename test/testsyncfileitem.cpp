@@ -7,6 +7,7 @@
 #include <QtTest>
 
 #include "syncfileitem.h"
+#include "logger.h"
 
 using namespace OCC;
 
@@ -15,13 +16,18 @@ class TestSyncFileItem : public QObject
     Q_OBJECT
 
 private slots:
-    void initTestCase() {
+    void initTestCase()
+    {
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
     }
 
     void cleanupTestCase() {
     }
 
-    SyncFileItem createItem( const QString& file ) {
+    OCC::SyncFileItem createItem( const QString& file ) {
         SyncFileItem i;
         i._file = file;
         return i;

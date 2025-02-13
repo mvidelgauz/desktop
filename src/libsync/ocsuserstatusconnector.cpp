@@ -59,7 +59,7 @@ QString onlineStatusToString(OCC::UserStatus::OnlineStatus status)
     case OCC::UserStatus::OnlineStatus::DoNotDisturb:
         return QStringLiteral("dnd");
     case OCC::UserStatus::OnlineStatus::Away:
-        return QStringLiteral("offline");
+        return QStringLiteral("away");
     case OCC::UserStatus::OnlineStatus::Offline:
         return QStringLiteral("offline");
     case OCC::UserStatus::OnlineStatus::Invisible:
@@ -110,18 +110,18 @@ quint64 clearAtEndOfToTimestamp(const OCC::ClearAt &clearAt)
     Q_ASSERT(clearAt._type == OCC::ClearAtType::EndOf);
 
     if (clearAt._endof == "day") {
-        return QDate::currentDate().addDays(1).startOfDay().toTime_t();
+        return QDate::currentDate().addDays(1).startOfDay().toSecsSinceEpoch();
     } else if (clearAt._endof == "week") {
         const auto days = Qt::Sunday - QDate::currentDate().dayOfWeek();
-        return QDate::currentDate().addDays(days + 1).startOfDay().toTime_t();
+        return QDate::currentDate().addDays(days + 1).startOfDay().toSecsSinceEpoch();
     }
     qCWarning(lcOcsUserStatusConnector) << "Can not handle clear at endof day type" << clearAt._endof;
-    return QDateTime::currentDateTime().toTime_t();
+    return QDateTime::currentDateTime().toSecsSinceEpoch();
 }
 
 quint64 clearAtPeriodToTimestamp(const OCC::ClearAt &clearAt)
 {
-    return QDateTime::currentDateTime().addSecs(clearAt._period).toTime_t();
+    return QDateTime::currentDateTime().addSecs(clearAt._period).toSecsSinceEpoch();
 }
 
 quint64 clearAtToTimestamp(const OCC::ClearAt &clearAt)
@@ -191,15 +191,15 @@ OCC::UserStatus jsonToUserStatus(QJsonObject jsonObject)
     return userStatus;
 }
 
-std::vector<OCC::UserStatus> jsonToPredefinedStatuses(QJsonArray jsonDataArray)
+QVector<OCC::UserStatus> jsonToPredefinedStatuses(QJsonArray jsonDataArray)
 {
-    std::vector<OCC::UserStatus> statuses;
+    QVector<OCC::UserStatus> statuses;
     for (const auto &jsonEntry : jsonDataArray) {
         Q_ASSERT(jsonEntry.isObject());
         if (!jsonEntry.isObject()) {
             continue;
         }
-        statuses.push_back(jsonToUserStatus(jsonEntry.toObject()));
+        statuses.append(jsonToUserStatus(jsonEntry.toObject()));
     }
 
     return statuses;
@@ -256,8 +256,14 @@ void OcsUserStatusConnector::onUserStatusFetched(const QJsonDocument &json, int 
         return;
     }
 
+    const auto oldOnlineState = _userStatus.state();
     _userStatus = jsonToUserStatus(json);
+
     emit userStatusFetched(_userStatus);
+
+    if (oldOnlineState != _userStatus.state()) {
+        emit serverUserStatusChanged();
+    }
 }
 
 void OcsUserStatusConnector::startFetchPredefinedStatuses()
@@ -396,7 +402,9 @@ void OcsUserStatusConnector::setUserStatus(const UserStatus &userStatus)
         return;
     }
 
-    setUserStatusOnlineStatus(userStatus.state());
+    if (userStatus.state() != _userStatus.state()) {
+        setUserStatusOnlineStatus(userStatus.state());
+    }
     setUserStatusMessage(userStatus);
 }
 
@@ -407,6 +415,15 @@ void OcsUserStatusConnector::onUserStatusOnlineStatusSet(const QJsonDocument &js
     if (statusCode != 200) {
         emit error(Error::CouldNotSetUserStatus);
         return;
+    }
+
+    const auto oldOnlineState = _userStatus.state();
+    _userStatus.setState(jsonToUserStatus(json).state());
+
+    emit userStatusSet();
+
+    if (oldOnlineState != _userStatus.state()) {
+        emit serverUserStatusChanged();
     }
 }
 
@@ -449,7 +466,10 @@ void OcsUserStatusConnector::onMessageCleared(const QJsonDocument &json, int sta
         return;
     }
 
+    const auto onlineState = _userStatus.state();
+
     _userStatus = {};
+    _userStatus.setState(onlineState);
     emit messageCleared();
 }
 }

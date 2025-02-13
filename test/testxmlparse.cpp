@@ -7,6 +7,7 @@
 #include <QtTest>
 
 #include "networkjobs.h"
+#include "logger.h"
 
 using namespace OCC;
 
@@ -15,7 +16,7 @@ class TestXmlParse : public QObject
     Q_OBJECT
 
 private:
-  bool _success;
+  bool _success = false;
   QStringList _subdirs;
   QStringList _items;
 
@@ -38,6 +39,14 @@ public slots:
   }
 
 private slots:
+    void initTestCase()
+    {
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void init() {
         qDebug() << Q_FUNC_INFO;
       _success = false;
@@ -102,12 +111,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" ));
@@ -176,12 +185,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(false == parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" )); // verify false
@@ -199,12 +208,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(false == parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" )); // verify false
@@ -221,12 +230,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(false == parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" )); // verify false
@@ -260,12 +269,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(!parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" ));
@@ -325,12 +334,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(false == parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" ));
@@ -390,12 +399,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(false == parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" ));
@@ -455,12 +464,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" ));
@@ -529,12 +538,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(!parser.parse( testXml, &sizes, "/oc/remote.php/dav/sharefolder" ));
@@ -594,12 +603,12 @@ private slots:
 
         LsColXMLParser parser;
 
-        connect( &parser, SIGNAL(directoryListingSubfolders(const QStringList&)),
-                 this, SLOT(slotDirectoryListingSubFolders(const QStringList&)) );
-        connect( &parser, SIGNAL(directoryListingIterated(const QString&, const QMap<QString,QString>&)),
-                 this, SLOT(slotDirectoryListingIterated(const QString&, const QMap<QString,QString>&)) );
-        connect( &parser, SIGNAL(finishedWithoutError()),
-                 this, SLOT(slotFinishedSuccessfully()) );
+        connect( &parser, &LsColXMLParser::directoryListingSubfolders,
+                 this, &TestXmlParse::slotDirectoryListingSubFolders );
+        connect( &parser, &LsColXMLParser::directoryListingIterated,
+                 this, &TestXmlParse::slotDirectoryListingIterated );
+        connect( &parser, &LsColXMLParser::finishedWithoutError,
+                 this, &TestXmlParse::slotFinishedSuccessfully );
 
         QHash <QString, ExtraFolderInfo> sizes;
         QVERIFY(parser.parse( testXml, &sizes, QString::fromUtf8("/ä") ));

@@ -1,6 +1,8 @@
 if (LINUX)
     set(vfs_xattr_SRCS
+        vfs_xattr.h
         vfs_xattr.cpp
+        xattrwrapper.h
         xattrwrapper_linux.cpp
     )
 
@@ -52,4 +54,8 @@ if (LINUX)
       LIBRARY DESTINATION "${vfs_installdir}"
       RUNTIME DESTINATION "${vfs_installdir}"
     )
+
+    if (WIN32)
+        install(FILES $<TARGET_PDB_FILE:nextcloudsync_vfs_xattr> DESTINATION bin OPTIONAL)
+    endif()
 endif()

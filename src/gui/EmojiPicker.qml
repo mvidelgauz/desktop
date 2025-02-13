@@ -12,11 +12,13 @@
  * for more details.
  */
 
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import QtQuick.Layouts 1.15
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
 
+import Style
 import com.nextcloud.desktopclient 1.0 as NC
+import "./tray"
 
 ColumnLayout {
     NC.EmojiModel {
@@ -34,6 +36,7 @@ ColumnLayout {
     ListView {
         id: headerLayout
         Layout.fillWidth: true
+        Layout.margins: 1
         implicitWidth: contentItem.childrenRect.width
         implicitHeight: metrics.height * 2
 
@@ -42,10 +45,21 @@ ColumnLayout {
         model: emojiModel.emojiCategoriesModel
 
         delegate: ItemDelegate {
+            id: headerDelegate
             width: metrics.height * 2
             height: headerLayout.height
 
-            contentItem: Text {
+            background: Rectangle {
+                color: palette.highlight
+                visible: ListView.isCurrentItem ||
+                         headerDelegate.highlighted ||
+                         headerDelegate.checked ||
+                         headerDelegate.down ||
+                         headerDelegate.hovered
+                radius: Style.slightlyRoundedButtonRadius
+            }
+
+            contentItem: EnforcedPlainTextLabel {
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
                 text: emoji
@@ -55,11 +69,11 @@ ColumnLayout {
                 anchors.bottom: parent.bottom
 
                 width: parent.width
-                height: 2
+                height: Style.thickBorderWidth
 
                 visible: ListView.isCurrentItem
 
-                color: "grey"
+                color: palette.dark
             }
 
 
@@ -71,15 +85,17 @@ ColumnLayout {
     }
 
     Rectangle {
-        height: 1
+        height: Style.normalBorderWidth
         Layout.fillWidth: true
-        color: "grey"
+        color: palette.dark
     }
 
     GridView {
+        id: emojiView
         Layout.fillWidth: true
         Layout.fillHeight: true
         Layout.preferredHeight: metrics.height * 8
+        Layout.margins: Style.normalBorderWidth
 
         cellWidth: metrics.height * 2
         cellHeight: metrics.height * 2
@@ -90,12 +106,20 @@ ColumnLayout {
         model: emojiModel.model
 
         delegate: ItemDelegate {
+            id: emojiDelegate
 
             width: metrics.height * 2
             height: metrics.height * 2
 
-            contentItem: Text {
-                anchors.centerIn: parent
+            background: Rectangle {
+                color: palette.highlight
+                visible: ListView.isCurrentItem || emojiDelegate.highlighted || emojiDelegate.checked || emojiDelegate.down || emojiDelegate.hovered
+                radius: Style.slightlyRoundedButtonRadius
+            }
+
+            contentItem: EnforcedPlainTextLabel {
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
                 text: modelData === undefined ? "" : modelData.unicode
             }
 
@@ -103,6 +127,16 @@ ColumnLayout {
                 chosen(modelData.unicode);
                 emojiModel.emojiUsed(modelData);
             }
+        }
+
+        EnforcedPlainTextLabel {
+            id: placeholderMessage
+            width: parent.width * 0.8
+            anchors.centerIn: parent
+            text: qsTr("No recent emojis")
+            wrapMode: Text.Wrap
+            font.bold: true
+            visible: emojiView.count === 0
         }
 
         ScrollBar.vertical: ScrollBar {}

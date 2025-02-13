@@ -1,4 +1,5 @@
 add_library(nextcloudsync_vfs_suffix SHARED
+    vfs_suffix.h
     vfs_suffix.cpp
 )
 
@@ -39,3 +40,6 @@ install(TARGETS nextcloudsync_vfs_suffix
   RUNTIME DESTINATION "${vfs_installdir}"
 )
 
+if (WIN32)
+    install(FILES $<TARGET_PDB_FILE:nextcloudsync_vfs_suffix> DESTINATION bin OPTIONAL)
+endif()

@@ -31,6 +31,17 @@ namespace OCC {
 
 class SyncFileItem;
 
+struct SyncJournalFileLockInfo {
+    bool _locked = false;
+    QString _lockOwnerDisplayName;
+    QString _lockOwnerId;
+    qint64 _lockOwnerType = 0;
+    QString _lockEditorApp;
+    qint64 _lockTime = 0;
+    qint64 _lockTimeout = 0;
+    QString _lockToken;
+};
+
 /**
  * @brief The SyncJournalFileRecord class
  * @ingroup libsync
@@ -38,10 +49,12 @@ class SyncFileItem;
 class OCSYNC_EXPORT SyncJournalFileRecord
 {
 public:
-    bool isValid() const
+    [[nodiscard]] bool isValid() const
     {
         return !_path.isEmpty();
     }
+
+    using EncryptionStatus = EncryptionStatusEnums::JournalDbEncryptionStatus;
 
     /** Returns the numeric part of the full id in _fileId.
      *
@@ -49,14 +62,15 @@ public:
      *
      * It is used in the construction of private links.
      */
-    QByteArray numericFileId() const;
-    QDateTime modDateTime() const { return Utility::qDateTimeFromTime_t(_modtime); }
+    [[nodiscard]] QByteArray numericFileId() const;
+    [[nodiscard]] QDateTime modDateTime() const { return Utility::qDateTimeFromTime_t(_modtime); }
 
-    bool isDirectory() const { return _type == ItemTypeDirectory; }
-    bool isFile() const { return _type == ItemTypeFile || _type == ItemTypeVirtualFileDehydration; }
-    bool isVirtualFile() const { return _type == ItemTypeVirtualFile || _type == ItemTypeVirtualFileDownload; }
-    QString path() const { return QString::fromUtf8(_path); }
-    QString e2eMangledName() const { return QString::fromUtf8(_e2eMangledName); }
+    [[nodiscard]] bool isDirectory() const { return _type == ItemTypeDirectory; }
+    [[nodiscard]] bool isFile() const { return _type == ItemTypeFile || _type == ItemTypeVirtualFileDehydration; }
+    [[nodiscard]] bool isVirtualFile() const { return _type == ItemTypeVirtualFile || _type == ItemTypeVirtualFileDownload; }
+    [[nodiscard]] QString path() const { return QString::fromUtf8(_path); }
+    [[nodiscard]] QString e2eMangledName() const { return QString::fromUtf8(_e2eMangledName); }
+    [[nodiscard]] bool isE2eEncrypted() const { return _e2eEncryptionStatus != EncryptionStatus::NotEncrypted; }
 
     QByteArray _path;
     quint64 _inode = 0;
@@ -69,8 +83,17 @@ public:
     bool _serverHasIgnoredFiles = false;
     QByteArray _checksumHeader;
     QByteArray _e2eMangledName;
-    bool _isE2eEncrypted = false;
+    EncryptionStatus _e2eEncryptionStatus = EncryptionStatus::NotEncrypted;
+    QByteArray _e2eCertificateFingerprint;
+    SyncJournalFileLockInfo _lockstate;
+    bool _isShared = false;
+    qint64 _lastShareStateFetchedTimestamp = 0;
+    bool _sharedByMe = false;
+    bool _isLivePhoto = false;
+    QString _livePhotoFile;
 };
+
+QDebug& operator<<(QDebug &stream, const SyncJournalFileRecord::EncryptionStatus status);
 
 bool OCSYNC_EXPORT
 operator==(const SyncJournalFileRecord &lhs,
@@ -106,10 +129,10 @@ public:
     QString _file;
     QString _renameTarget;
 
-    /// The last X-Request-ID of the request that failled
+    /// The last X-Request-ID of the request that failed
     QByteArray _requestId;
 
-    bool isValid() const;
+    [[nodiscard]] bool isValid() const;
 };
 
 /** Represents a conflict in the conflicts table.
@@ -154,7 +177,7 @@ public:
     QByteArray initialBasePath;
 
 
-    bool isValid() const { return !path.isEmpty(); }
+    [[nodiscard]] bool isValid() const { return !path.isEmpty(); }
 };
 }
 

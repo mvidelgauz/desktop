@@ -35,11 +35,28 @@ class InvalidFilenameDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit InvalidFilenameDialog(AccountPtr account, Folder *folder, QString filePath, QWidget *parent = nullptr);
+    enum class FileLocation {
+        Default = 0,
+        NewLocalFile,
+    };
+    enum class InvalidMode {
+        SystemInvalid,
+        ServerInvalid
+    };
+
+    explicit InvalidFilenameDialog(AccountPtr account,
+                                   Folder *folder,
+                                   QString filePath,
+                                   FileLocation fileLocation = FileLocation::Default,
+                                   InvalidMode invalidMode = InvalidMode::SystemInvalid,
+                                   QWidget *parent = nullptr);
 
     ~InvalidFilenameDialog() override;
 
     void accept() override;
+
+signals:
+    void acceptedInvalidName(const QString &filePath);
 
 private:
     std::unique_ptr<Ui::InvalidFilenameDialog> _ui;
@@ -50,12 +67,21 @@ private:
     QString _relativeFilePath;
     QString _originalFileName;
     QString _newFilename;
+    FileLocation _fileLocation = FileLocation::Default;
 
     void onFilenameLineEditTextChanged(const QString &text);
     void onMoveJobFinished();
-    void onRemoteFileAlreadyExists(const QVariantMap &values);
-    void onRemoteFileDoesNotExist(QNetworkReply *reply);
+    void onRemoteDestinationFileAlreadyExists(const QVariantMap &values);
+    void onRemoteDestinationFileDoesNotExist(QNetworkReply *reply);
+    void onRemoteSourceFileAlreadyExists(const QVariantMap &values);
+    void onRemoteSourceFileDoesNotExist(QNetworkReply *reply);
     void checkIfAllowedToRename();
+    void onCheckIfAllowedToRenameComplete(const QVariantMap &values, QNetworkReply *reply = nullptr);
+    bool processLeadingOrTrailingSpacesError(const QString &fileName);
     void onPropfindPermissionSuccess(const QVariantMap &values);
+    void onPropfindPermissionError(QNetworkReply *reply = nullptr);
+    void allowRenaming();
+private slots:
+    void useInvalidName();
 };
 }

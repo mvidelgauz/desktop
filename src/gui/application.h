@@ -20,7 +20,7 @@
 #include <QQueue>
 #include <QTimer>
 #include <QElapsedTimer>
-#include <QNetworkConfigurationManager>
+#include <QNetworkInformation>
 
 #include "qtsingleapplication.h"
 
@@ -46,6 +46,7 @@ Q_DECLARE_LOGGING_CATEGORY(lcApplication)
 
 class Theme;
 class Folder;
+class ShellExtensionsServer;
 class SslErrorDialog;
 
 /**
@@ -63,13 +64,15 @@ public:
     void showHelp();
     void showHint(std::string errorHint);
     bool debugMode();
-    bool backgroundMode() const;
+    [[nodiscard]] bool backgroundMode() const;
     bool versionOnly(); // only display the version?
     void showVersion();
 
     void showMainDialog();
 
-    ownCloudGui *gui() const;
+    [[nodiscard]] ownCloudGui *gui() const;
+
+    bool event(QEvent *event) override;
 
 public slots:
     // TODO: this should not be public
@@ -88,25 +91,30 @@ protected:
     void parseOptions(const QStringList &);
     void setupTranslations();
     void setupLogging();
-    bool event(QEvent *event) override;
 
 signals:
     void folderRemoved();
-    void folderStateChanged(Folder *);
+    void folderStateChanged(OCC::Folder *);
     void isShowingSettingsDialog();
+    void systemPaletteChanged();
 
 protected slots:
     void slotParseMessage(const QString &, QObject *);
     void slotCheckConnection();
-    void slotUseMonoIconsChanged(bool);
     void slotCleanup();
-    void slotAccountStateAdded(AccountState *accountState);
-    void slotAccountStateRemoved(AccountState *accountState);
-    void slotSystemOnlineConfigurationChanged(QNetworkConfiguration);
+    void slotAccountStateAdded(OCC::AccountState *accountState);
+    void slotAccountStateRemoved(OCC::AccountState *accountState);
+    void slotSystemOnlineConfigurationChanged();
     void slotGuiIsShowingSettings();
 
 private:
     void setHelp();
+
+    void handleEditLocallyFromOptions();
+
+    AccountManager::AccountsRestoreResult restoreLegacyAccount();
+    void setupConfigFile();
+    void setupAccountsAndFolders();
 
     /**
      * Maybe a newer version of the client was used with this config file:
@@ -118,32 +126,38 @@ private:
 
     Theme *_theme;
 
-    bool _helpOnly;
-    bool _versionOnly;
+    bool _helpOnly = false;
+    bool _versionOnly = false;
 
     QElapsedTimer _startedAt;
 
     // options from command line:
-    bool _showLogWindow;
+    bool _showLogWindow = false;
     bool _quitInstance = false;
     QString _logFile;
     QString _logDir;
-    int _logExpire;
-    bool _logFlush;
-    bool _logDebug;
-    bool _userTriggeredConnect;
-    bool _debugMode;
-    bool _backgroundMode;
+    int _logExpire = 0;
+    bool _logFlush = false;
+    bool _logDebug = false;
+    bool _userTriggeredConnect = false;
+    bool _debugMode = false;
+    bool _backgroundMode = false;
+    QUrl _editFileLocallyUrl;
 
     ClientProxy _proxy;
 
-    QNetworkConfigurationManager _networkConfigurationManager;
     QTimer _checkConnectionTimer;
+
+    QString _overrideServerUrl;
+    QString _overrideLocalDir;
 
 #if defined(WITH_CRASHREPORTER)
     QScopedPointer<CrashReporter::Handler> _crashHandler;
 #endif
     QScopedPointer<FolderMan> _folderManager;
+#if defined(Q_OS_WIN)
+    QScopedPointer<ShellExtensionsServer> _shellExtensionsServer;
+#endif
 };
 
 } // namespace OCC
